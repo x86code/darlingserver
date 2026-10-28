@@ -577,6 +577,7 @@ host_set_exception_ports(
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED: // xnu://10002.1.13
 			break;
 		default:
 			return KERN_INVALID_ARGUMENT;
@@ -591,6 +592,13 @@ host_set_exception_ports(
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	// <copied from="xnu://10002.1.13/osfmk/kern/ipc_host.c"> (without MACH_EXCEPTION_BACKTRACE_PREFERRED, which this XNU lacks)
+	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	// </copied>
 
 #if CONFIG_MACF
 	if (mac_task_check_set_host_exception_ports(current_task(), exception_mask) != 0) {
@@ -766,10 +774,11 @@ host_swap_exception_ports(
 	}
 
 	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
+		switch (new_behavior & ~MACH_EXCEPTION_MASK) { // xnu://10002.1.13: MACH_EXCEPTION_CODES is a flag
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED: // xnu://10002.1.13
 			break;
 		default:
 			return KERN_INVALID_ARGUMENT;
@@ -779,6 +788,13 @@ host_swap_exception_ports(
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	// <copied from="xnu://10002.1.13/osfmk/kern/ipc_host.c"> (without MACH_EXCEPTION_BACKTRACE_PREFERRED, which this XNU lacks)
+	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	// </copied>
 
 #if CONFIG_MACF
 	if (mac_task_check_set_host_exception_ports(current_task(), exception_mask) != 0) {

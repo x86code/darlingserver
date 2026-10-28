@@ -262,3 +262,17 @@ catch_mach_exception_raise_state_identity(
 {
 	return KERN_INVALID_ARGUMENT;
 }
+
+// <copied from="xnu://10002.1.13/osfmk/kern/ux_handler.c">
+kern_return_t
+catch_mach_exception_raise_identity_protected(
+	__unused mach_port_t               exception_port,
+	__unused uint64_t                  thread_id,
+	__unused mach_port_t               task_id_token,
+	__unused exception_type_t          exception,
+	__unused mach_exception_data_t     code,
+	__unused mach_msg_type_number_t    codeCnt)
+{
+	return KERN_INVALID_ARGUMENT;
+}
+// </copied>

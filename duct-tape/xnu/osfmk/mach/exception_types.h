@@ -123,6 +123,13 @@
  *	the thread identity and state.
  */
 
+// <copied from="xnu://10002.1.13/osfmk/mach/exception_types.h">
+#define EXCEPTION_IDENTITY_PROTECTED   4
+/*	Send a catch_exception_raise_identity_protected message including protected task
+ *  and thread identity.
+ */
+// </copied>
+
 #define MACH_EXCEPTION_ERRORS           0x40000000
 /*	include additional exception specific errors, not used yet.  */
 

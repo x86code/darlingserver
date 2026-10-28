@@ -1358,6 +1358,29 @@ host_get_special_port(host_priv_t host_priv, __unused int node, int id, ipc_port
 	return KERN_SUCCESS;
 }
 
+#ifdef __DARLING__
+/*
+ * x86Code: in Darling, IOKit is the iokitd daemon. It publishes its main port here
+ * so host_get_io_master() works (IOKit in iOS simulator processes relies on it; Darling's
+ * own IOKit looks iokitd up by name). User tasks only hold the unprivileged host port.
+ */
+kern_return_t
+host_darling_set_io_master_port(mach_port_name_t name)
+{
+	ipc_port_t port = IP_NULL;
+	kern_return_t kr;
+
+	if (MACH_PORT_VALID(name)) {
+		// iokitd holds the receive right (from bootstrap_check_in): make a send right
+		kr = ipc_object_copyin(current_space(), name, MACH_MSG_TYPE_MAKE_SEND, (ipc_object_t *)&port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_NONE);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+	}
+	return kernel_set_special_port(host_priv_self(), HOST_IO_MASTER_PORT, port);
+}
+#endif
+
 /*
  *	host_get_io_master
  *

@@ -1909,6 +1909,34 @@ task_set_special_port(
 }
 
 /*
+ * x86Code: set a special port of the current task the way posix_spawn port
+ * actions do in XNU (exec_handle_port_actions): immovable send rights are
+ * accepted, unlike task_set_special_port() from user space. Used by Darling's
+ * posix_spawn emulation right before exec (xpcproxy hands jobs their bootstrap
+ * port this way).
+ */
+kern_return_t
+task_spawn_set_special_port(int which, mach_port_name_t name)
+{
+	ipc_port_t port = IP_NULL;
+	kern_return_t kr;
+
+	if (MACH_PORT_VALID(name)) {
+		kr = ipc_object_copyin(current_space(), name, MACH_MSG_TYPE_COPY_SEND,
+		    (ipc_object_t *)&port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+	}
+
+	kr = task_set_special_port_internal(current_task(), which, port);
+	if (kr != KERN_SUCCESS && IP_VALID(port)) {
+		ipc_port_release_send(port);
+	}
+	return kr;
+}
+
+/*
  *	Routine:	task_set_special_port_internal
  *	Purpose:
  *		Changes one of the task's special ports,
@@ -3731,6 +3759,7 @@ thread_set_exception_ports(
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED: // xnu://10002.1.13
 			break;
 
 		default:
@@ -3751,6 +3780,13 @@ thread_set_exception_ports(
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	// <copied from="xnu://10002.1.13/osfmk/kern/ipc_tt.c"> (without MACH_EXCEPTION_BACKTRACE_PREFERRED, which this XNU lacks)
+	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	// </copied>
 
 #if CONFIG_MACF
 	new_label = mac_exc_create_label_for_current_proc();
@@ -3831,6 +3867,7 @@ task_set_exception_ports(
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED: // xnu://10002.1.13
 			break;
 
 		default:
@@ -3851,6 +3888,13 @@ task_set_exception_ports(
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	// <copied from="xnu://10002.1.13/osfmk/kern/ipc_tt.c"> (without MACH_EXCEPTION_BACKTRACE_PREFERRED, which this XNU lacks)
+	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	// </copied>
 
 #if CONFIG_MACF
 	new_label = mac_exc_create_label_for_current_proc();
@@ -3960,6 +4004,7 @@ thread_swap_exception_ports(
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED: // xnu://10002.1.13
 			break;
 
 		default:
@@ -3975,6 +4020,13 @@ thread_swap_exception_ports(
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	// <copied from="xnu://10002.1.13/osfmk/kern/ipc_tt.c"> (without MACH_EXCEPTION_BACKTRACE_PREFERRED, which this XNU lacks)
+	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	// </copied>
 
 #if CONFIG_MACF
 	new_label = mac_exc_create_label_for_current_proc();
@@ -4088,6 +4140,7 @@ task_swap_exception_ports(
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED: // xnu://10002.1.13
 			break;
 
 		default:
@@ -4103,6 +4156,13 @@ task_swap_exception_ports(
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	// <copied from="xnu://10002.1.13/osfmk/kern/ipc_tt.c"> (without MACH_EXCEPTION_BACKTRACE_PREFERRED, which this XNU lacks)
+	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	// </copied>
 
 #if CONFIG_MACF
 	new_label = mac_exc_create_label_for_current_proc();

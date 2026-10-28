@@ -85,6 +85,7 @@
 #include <kern/host.h>
 #include <kern/misc_protos.h>
 #include <kern/ux_handler.h>
+#include <kern/task_ident.h>
 
 #include <vm/vm_map.h>
 
@@ -98,6 +99,7 @@ bool panic_on_exception_triage = false;
 unsigned long c_thr_exc_raise = 0;
 unsigned long c_thr_exc_raise_state = 0;
 unsigned long c_thr_exc_raise_state_id = 0;
+unsigned long c_thr_exc_raise_identity_token = 0; // xnu://10002.1.13/osfmk/kern/exception.c
 unsigned long c_tsk_exc_raise = 0;
 unsigned long c_tsk_exc_raise_state = 0;
 unsigned long c_tsk_exc_raise_state_id = 0;
@@ -179,7 +181,9 @@ exception_deliver(
 	int                     flavor;
 	kern_return_t           kr;
 	task_t task;
-	ipc_port_t thread_port = IPC_PORT_NULL, task_port = IPC_PORT_NULL;
+	task_id_token_t task_token;
+	ipc_port_t thread_port = IPC_PORT_NULL, task_port = IPC_PORT_NULL,
+	    task_token_port = IPC_PORT_NULL;
 
 	/*
 	 *  Save work if we are terminating.
@@ -257,7 +261,8 @@ exception_deliver(
 	}
 #endif
 
-	if (behavior != EXCEPTION_STATE) {
+	// (the protected identity sends neither: see its case)
+	if (behavior != EXCEPTION_STATE && behavior != EXCEPTION_IDENTITY_PROTECTED) {
 		task_reference(task);
 		task_port = convert_task_to_port(task);
 		/* task ref consumed */
@@ -372,12 +377,46 @@ exception_deliver(
 		goto out_release_right;
 	}
 
+	// <copied from="xnu://10002.1.13/osfmk/kern/exception.c">
+	case EXCEPTION_IDENTITY_PROTECTED: {
+		c_thr_exc_raise_identity_token++;
+
+		kr = task_create_identity_token(task, &task_token);
+		if (!task->active && kr == KERN_INVALID_ARGUMENT) {
+			/* The task is terminating, don't need to send more exceptions */
+			kr = KERN_SUCCESS;
+			goto out_release_right;
+		}
+		/* task_token now represents a task, or corpse */
+		assert(kr == KERN_SUCCESS);
+		task_token_port = convert_task_id_token_to_port(task_token);
+		/* task token ref consumed */
+
+		if (code64) {
+			kr = mach_exception_raise_identity_protected(exc_port,
+			    thread->thread_id,
+			    task_token_port,
+			    exception,
+			    code,
+			    codeCnt);
+		} else {
+			panic("mach_exception_raise_identity_protected() must be code64");
+		}
+
+		goto out_release_right;
+	}
+	// </copied>
+
 	default:
 		panic("bad exception behavior!");
 		return KERN_FAILURE;
 	}/* switch */
 
 out_release_right:
+
+	if (task_token_port) {
+		ipc_port_release_send(task_token_port);
+	}
 
 	if (task_port) {
 		ipc_port_release_send(task_port);
