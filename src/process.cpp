@@ -403,7 +403,11 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
 	} else {
 		// notify the parent process (if we have one) that we've arrived
 		if (auto parent = _parentProcess.lock()) {
-			dtape_semaphore_up(parent->_dtapeForkWaitSemaphore);
+			// x86Code: the parent may have died meanwhile; its fork-wait semaphore is then already destroyed (null),
+			// and dtape_semaphore_up(NULL) took darlingserver and the whole container down (seen when a simulator
+			// app's spawner exited while the app was checking in)
+			if (auto sem = parent->_dtapeForkWaitSemaphore)
+				dtape_semaphore_up(sem);
 			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
 		}
 	}
