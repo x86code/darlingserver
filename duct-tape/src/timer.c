@@ -52,9 +52,31 @@ uint64_t _rtc_nanotime_read(pal_rtc_nanotime_t* rntp) {
 	return (ts.tv_sec * NSEC_PER_SEC) + ts.tv_nsec;
 };
 
+static uint64_t dtape_timer_queue_head_deadline_locked(mpqueue_head_t* queue) {
+	timer_call_t head = priority_queue_min(&queue->mpq_pqhead, struct timer_call, tc_pqlink);
+	return head ? head->tc_pqlink.deadline : UINT64_MAX;
+};
+
+/**
+ * Called by timer_call_enqueue_deadline_unlocked() with the queue locked, after it enqueued a timer.
+ *
+ * timer_queue_assign() arms the timerfd before the timer is in the queue. A dtape_timer_fired() on another worker thread
+ * could take the queue's head in between and re-arm for it (or disarm, for an empty queue), losing the new timer: every
+ * later timed wait (sleep(), semaphore_timedwait(), mach_msg() timeouts) then hangs. Arming again here, under the queue
+ * lock that dtape_timer_fired() also re-arms under, closes that window.
+ */
+void dtape_timer_queue_changed_locked(mpqueue_head_t* queue) {
+	dtape_hooks->timer_arm(dtape_timer_queue_head_deadline_locked(queue), false);
+};
+
 void dtape_timer_fired(void) {
-	uint64_t next_deadline = timer_queue_expire(&timer_queue, mach_absolute_time());
-	dtape_hooks->timer_arm(next_deadline, true);
+	timer_queue_expire(&timer_queue, mach_absolute_time());
+
+	// re-arm for the queue's head under its lock, rather than for the deadline timer_queue_expire() returned after
+	// unlocking it, which may predate a timer enqueued since
+	lck_mtx_lock_spin_always(&timer_queue.lock_data);
+	dtape_hooks->timer_arm(dtape_timer_queue_head_deadline_locked(&timer_queue), true);
+	lck_mtx_unlock_always(&timer_queue.lock_data);
 };
 
 void timer_call_nosync_cpu(int cpu, void (*fn)(void* arg), void* arg) {

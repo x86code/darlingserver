@@ -529,6 +529,9 @@ ipc_mqueue_send(
 {
 	int wresult;
 
+#ifdef __DARLING__
+retry:
+#endif
 	/*
 	 *  Don't block if:
 	 *	1) We're under the queue limit.
@@ -611,6 +614,14 @@ ipc_mqueue_send(
 			break;
 
 		case THREAD_TIMED_OUT:
+#ifdef __DARLING__
+			// x86Code: the wait can end as "timed out" without a deadline (seen with
+			// SpringBoard filling a queue); that is a spurious wakeup, so wait again
+			if (!(option & MACH_SEND_TIMEOUT)) {
+				imq_lock(mqueue);
+				goto retry;
+			}
+#endif
 			assert(option & MACH_SEND_TIMEOUT);
 			return MACH_SEND_TIMED_OUT;
 

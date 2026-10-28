@@ -129,7 +129,15 @@ void DarlingServer::Log::_log(Type type, std::string message) const {
 		return level;
 	}();
 
-	if ((type < logMinLevel && !_alwaysLog) || logFile < 0) {
+	// DSERVER_LOG_CATEGORIES: comma-separated categories logged at every level, whatever DSERVER_LOG_LEVEL says
+	static std::string debugCategories = []() {
+		auto val = getenv("DSERVER_LOG_CATEGORIES");
+		return val ? std::string(",") + val + "," : std::string();
+	}();
+
+	bool debugCategory = !debugCategories.empty() && debugCategories.find("," + _category + ",") != std::string::npos;
+
+	if ((type < logMinLevel && !_alwaysLog && !debugCategory) || logFile < 0) {
 		return;
 	}
 

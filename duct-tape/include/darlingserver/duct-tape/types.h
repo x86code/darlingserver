@@ -49,6 +49,8 @@ typedef struct dtape_memory_region_info {
 	uint64_t map_offset;
 	dtape_memory_protection_t protection;
 	bool shared;
+	uint64_t inode; // x86Code: of the mapped file (memory entries over existing shared mappings)
+	bool anon_shared; // x86Code: MAP_SHARED|MAP_ANON memory (not a file)
 } dtape_memory_region_info_t;
 
 typedef enum dtape_memory_flags {

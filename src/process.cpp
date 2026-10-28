@@ -26,8 +26,13 @@
 
 #include <fstream>
 #include <regex>
+#include <utility> // x86Code
+#include <vector> // x86Code
 
 #include <sys/mman.h>
+#include <fcntl.h> // x86Code
+#include <string_view> // x86Code
+#include <cstring> // x86Code
 
 static DarlingServer::Log processLog("process");
 
@@ -196,6 +201,17 @@ void DarlingServer::Process::setStartSuspended(bool startSuspended) {
 	_startSuspended = startSuspended;
 };
 
+// x86Code: posix_spawn returns once the child has exec'd on macOS, so nobody can see that exec as NOTE_EXEC.
+// Here the parent's posix_spawn returns at the Linux execve of mldr and the child registers the exec with us
+// later, after the parent may have attached an EVFILT_PROC source: launchd_sim then took xpcproxy_sim's own
+// start for the exec of the service and marked the job running before xpcproxy_sim had exec'd the real
+// program, and runningboardd read the bundle properties of xpcproxy_sim for every extension ("could not find
+// extension point", so PosterKit's rendering assertions were refused and the wallpaper never drew).
+void DarlingServer::Process::setSpawnExec(bool spawnExec) {
+	std::unique_lock lock(_rwlock);
+	_spawnExec = spawnExec;
+};
+
 bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAddress, void* localBuffer, size_t length, int* errorCode) const {
 	struct iovec local;
 	struct iovec remote;
@@ -323,15 +339,23 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
 		auto newThread = dtape_thread_create(_dtapeTask, mainThread->_nstid, mainThread.get());
 		mainThread->_dtapeThread = newThread;
 
-		// destroy the main thread's old S2C semaphores
-		dtape_semaphore_destroy(mainThread->_s2cPerformSempahore);
-		mainThread->_s2cPerformSempahore = nullptr;
-		dtape_semaphore_destroy(mainThread->_s2cReplySempahore);
-		mainThread->_s2cReplySempahore = nullptr;
-		dtape_semaphore_destroy(mainThread->_s2cInterruptEnterSemaphore);
-		mainThread->_s2cInterruptEnterSemaphore = nullptr;
-		dtape_semaphore_destroy(mainThread->_s2cInterruptExitSemaphore);
-		mainThread->_s2cInterruptExitSemaphore = nullptr;
+		// destroy the main thread's old S2C semaphores: x86Code (willi/darlingserver#10/#14): taken under the thread's
+		// lock, as _s2cPerform() retains them under it; a request on the old ones is void
+		dtape_semaphore_t* oldS2CSemaphores[4];
+		{
+			std::unique_lock threadLock(mainThread->_rwlock);
+			oldS2CSemaphores[0] = std::exchange(mainThread->_s2cPerformSempahore, nullptr);
+			oldS2CSemaphores[1] = std::exchange(mainThread->_s2cReplySempahore, nullptr);
+			oldS2CSemaphores[2] = std::exchange(mainThread->_s2cInterruptEnterSemaphore, nullptr);
+			oldS2CSemaphores[3] = std::exchange(mainThread->_s2cInterruptExitSemaphore, nullptr);
+			mainThread->_s2cRequest = 0;
+			mainThread->_s2cAbandonedReplies = 0;
+		}
+		for (auto semaphore: oldS2CSemaphores) {
+			if (semaphore) {
+				dtape_semaphore_destroy(semaphore);
+			}
+		}
 
 		// destroy the fork-wait semaphore
 		dtape_semaphore_destroy(_dtapeForkWaitSemaphore);
@@ -346,11 +370,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
 		// create a new fork-wait semaphore for the new task
 		_dtapeForkWaitSemaphore = dtape_semaphore_create(_dtapeTask, 0);
 
-		// create new S2C semaphores for the main thread
-		mainThread->_s2cPerformSempahore = dtape_semaphore_create(_dtapeTask, 1);
-		mainThread->_s2cReplySempahore = dtape_semaphore_create(_dtapeTask, 0);
-		mainThread->_s2cInterruptEnterSemaphore = dtape_semaphore_create(_dtapeTask, 0);
-		mainThread->_s2cInterruptExitSemaphore = dtape_semaphore_create(_dtapeTask, 0);
+		// create new S2C semaphores for the main thread (x86Code: set under its lock, willi/darlingserver#10)
+		{
+			auto performSemaphore = dtape_semaphore_create(_dtapeTask, 1);
+			auto replySemaphore = dtape_semaphore_create(_dtapeTask, 0);
+			auto enterSemaphore = dtape_semaphore_create(_dtapeTask, 0);
+			auto exitSemaphore = dtape_semaphore_create(_dtapeTask, 0);
+			std::unique_lock threadLock(mainThread->_rwlock);
+			mainThread->_s2cPerformSempahore = performSemaphore;
+			mainThread->_s2cReplySempahore = replySemaphore;
+			mainThread->_s2cInterruptEnterSemaphore = enterSemaphore;
+			mainThread->_s2cInterruptExitSemaphore = exitSemaphore;
+		}
 	} else {
 		// fork case
 
@@ -361,9 +392,12 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
 
 	_pendingReplacement = false;
 
+	bool spawnExec = _spawnExec; // x86Code
+	_spawnExec = false;
+
 	lock.unlock();
 
-	if (didExec) {
+	if (didExec && !spawnExec) {
 		// notify listeners that we have exec'd (i.e. been replaced)
 		_notifyListeningKqchannels(NOTE_EXEC, 0);
 	} else {
@@ -465,7 +499,28 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
 	return info;
 };
 
-static const std::regex memoryRegionEntryRegex("([0-9a-fA-F]+)\\-([0-9a-fA-F]+)\\s+((?:r|w|x|p|s|\\-)+)\\s+([0-9a-fA-F]+)");
+// x86Code: /proc/<pid>/maps is parsed by hand, not with std::regex. mach_make_memory_entry (every xpc_shmem, e.g.
+// MTLSimDriver's command-buffer segments) and the memfd-for-region RPC look a region up here, and a simulator process
+// has thousands of mappings: matching a regex against every line took ~75% of darlingserver's worker thread during
+// CoreAnimation animations, which capped the frame rate. Only the line holding the address is parsed in full.
+// Fields: start-end perms offset dev inode [path] (the path tells anonymous shared memory from file mappings).
+static bool parseHex(const char*& p, const char* end, uintptr_t& out) {
+	const char* start = p;
+	uintptr_t v = 0;
+	for (; p < end; ++p) {
+		char c = *p;
+		unsigned d;
+		if (c >= '0' && c <= '9') d = c - '0';
+		else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+		else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+		else break;
+		v = (v << 4) | d;
+	}
+	out = v;
+	return p != start;
+}
+static void skipSpaces(const char*& p, const char* end) { while (p < end && (*p == ' ' || *p == '\t')) ++p; }
+static const char* skipField(const char* p, const char* end) { while (p < end && *p != ' ' && *p != '\t') ++p; return p; }
 
 DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
 	if (isDead()) {
@@ -473,46 +528,79 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
 	}
 
 	MemoryRegionInfo info;
-	std::ifstream file("/proc/" + std::to_string(_pid) + "/maps");
-	std::string line;
+	std::string path = "/proc/" + std::to_string(_pid) + "/maps";
+	int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		processLog.warning() << *this << ": can't open \"" << path << "\"" << processLog.endLog;
+		throw std::system_error(EFAULT, std::generic_category());
+	}
 
-	uintptr_t endAddress;
+	// read in chunks; a line split across two reads is carried over
+	std::vector<char> buf(256 * 1024);
+	size_t have = 0;
+	bool eof = false;
+	bool found = false;
 
-	while (std::getline(file, line)) {
-		std::smatch match;
-
-		if (!std::regex_search(line, match, memoryRegionEntryRegex)) {
-			processLog.warning() << "Encountered malformed `/proc/<pid>/maps` entry? Definitely a bug (on our part)." << processLog.endLog;
-			continue;
+	while (!found) {
+		if (!eof) {
+			ssize_t n = read(fd, buf.data() + have, buf.size() - have);
+			if (n < 0) {
+				if (errno == EINTR) continue;
+				break;
+			}
+			if (n == 0) eof = true;
+			have += n;
 		}
+		const char* p = buf.data();
+		const char* end = p + have;
+		const char* lineEnd;
+		while (p < end && ((lineEnd = (const char*)memchr(p, '\n', end - p)) || eof)) {
+			if (!lineEnd) lineEnd = end;
+			const char* q = p;
+			uintptr_t start, stop;
+			if (!parseHex(q, lineEnd, start) || q >= lineEnd || *q++ != '-' || !parseHex(q, lineEnd, stop)) {
+				processLog.warning() << "Encountered malformed `/proc/<pid>/maps` entry? Definitely a bug (on our part)." << processLog.endLog;
+			} else if (stop > address && start <= address) {
+				skipSpaces(q, lineEnd);
+				const char* perms = q;
+				q = skipField(q, lineEnd);
+				std::string_view permsView(perms, q - perms);
+				skipSpaces(q, lineEnd);
+				uintptr_t offset = 0;
+				parseHex(q, lineEnd, offset);
+				skipSpaces(q, lineEnd);
+				q = skipField(q, lineEnd);   // device
+				skipSpaces(q, lineEnd);
+				uint64_t inode = 0;
+				while (q < lineEnd && *q >= '0' && *q <= '9') inode = inode * 10 + (*q++ - '0');
+				skipSpaces(q, lineEnd);
+				std::string_view pathView(q, lineEnd - q);
 
-		info.startAddress = std::stoul(match[1].str(), nullptr, 16);
-		endAddress = std::stoul(match[2].str(), nullptr, 16);
-
-		if (endAddress <= address || info.startAddress > address) {
-			continue;
+				info.startAddress = start;
+				info.pageCount = (stop - start) / sysconf(_SC_PAGESIZE);
+				info.mapOffset = offset;
+				info.protection = 0;
+				if (permsView.find('r') != std::string_view::npos) info.protection |= PROT_READ;
+				if (permsView.find('w') != std::string_view::npos) info.protection |= PROT_WRITE;
+				if (permsView.find('x') != std::string_view::npos) info.protection |= PROT_EXEC;
+				info.shared = permsView.find('s') != std::string_view::npos;
+				info.inode = inode;
+				// x86Code: shared anonymous memory is a shmem object Linux names "/dev/zero (deleted)"
+				info.anonShared = info.shared && pathView.rfind("/dev/zero", 0) == 0;
+				found = true;
+				break;
+			}
+			p = lineEnd < end ? lineEnd + 1 : end;
 		}
+		if (found || eof) break;
+		// keep the partial line
+		have = end - p;
+		memmove(buf.data(), p, have);
+		if (have == buf.size()) buf.resize(buf.size() * 2);
+	}
+	close(fd);
 
-		info.pageCount = (endAddress - info.startAddress) / sysconf(_SC_PAGESIZE);
-
-		info.mapOffset = std::stoul(match[4].str(), nullptr, 16);
-
-		auto perms = match[3].str();
-
-		info.protection = 0;
-
-		if (perms.find('r') != std::string::npos) {
-			info.protection |= PROT_READ;
-		}
-		if (perms.find('w') != std::string::npos) {
-			info.protection |= PROT_WRITE;
-		}
-		if (perms.find('x') != std::string::npos) {
-			info.protection |= PROT_EXEC;
-		}
-
-		info.shared = perms.find('s') != std::string::npos;
-
+	if (found) {
 		return info;
 	}
 
@@ -575,26 +663,32 @@ std::shared_ptr<DarlingServer::Thread> DarlingServer::Process::_pickS2CThread(vo
 		return nullptr;
 	}
 
-	// if we're the process for the current thread (i.e. we're the current process), use the current thread
+	// if we're the process for the current thread (i.e. we're the current process), use the current thread, unless
+	// it's dying (x86Code, willi/darlingserver#14)
 	if (currentProcess().get() == this) {
-		return Thread::currentThread();
-	}
-
-	// otherwise, pick any thread to perform the call
-
-	std::shared_ptr<Thread> thread = nullptr;
-
-	{
-		std::shared_lock lock(_rwlock);
-		for (auto& [id, weakThread]: _threads) {
-			thread = weakThread.lock();
-			if (thread) {
-				break;
-			}
+		auto current = Thread::currentThread();
+		if (current && !current->isDead()) {
+			return current;
 		}
 	}
 
-	return thread;
+	// otherwise, pick any thread that isn't dead (a dead one would never take it). x86Code (willi/darlingserver#14): the
+	// weak references are copied under the lock and locked outside it, as notifyDead() does: the last reference to a
+	// dying thread may be the one taken here, and ~Thread takes this lock.
+	std::vector<std::weak_ptr<Thread>> candidates;
+	{
+		std::shared_lock lock(_rwlock);
+		candidates.reserve(_threads.size());
+		for (auto& [id, weakThread]: _threads) {
+			candidates.push_back(weakThread);
+		}
+	}
+	for (auto& weakThread: candidates) {
+		if (auto thread = weakThread.lock(); thread && !thread->isDead()) {
+			return thread;
+		}
+	}
+	return nullptr;
 };
 
 std::string DarlingServer::Process::executablePath() const {
@@ -607,54 +701,54 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
 	_executablePath = std::move(path);
 };
 
-uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
-	auto thread = _pickS2CThread();
-
-	if (!thread) {
-		throw std::system_error(ESRCH, std::generic_category());
+// x86Code (willi/darlingserver#14): runs `function` with a thread of ours to perform the S2C call. One that dies before
+// it takes the call fails it with ESRCH, unsent, and another thread is picked (_pickS2CThread() skips the dead), 16
+// tries at most. As XNU's vm_map_enter() into another task doesn't depend on which of its threads runs.
+template<typename Function>
+auto DarlingServer::Process::_performS2C(Function&& function) {
+	for (int attempt = 1; ; attempt++) {
+		auto thread = _pickS2CThread();
+		if (!thread) {
+			throw std::system_error(ESRCH, std::generic_category());
+		}
+		try {
+			return function(thread);
+		} catch (const std::system_error& e) {
+			if (e.code().value() != ESRCH || !thread->isDead() || attempt >= 16) {
+				throw;
+			}
+		}
 	}
+};
 
-	return thread->allocatePages(pageCount, protection, addressHint, fixed, overwrite);
+uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
+	return _performS2C([&](const std::shared_ptr<Thread>& thread) {
+		return thread->allocatePages(pageCount, protection, addressHint, fixed, overwrite);
+	});
 };
 
 void DarlingServer::Process::freePages(uintptr_t address, size_t pageCount) {
-	auto thread = _pickS2CThread();
-
-	if (!thread) {
-		throw std::system_error(ESRCH, std::generic_category());
-	}
-
-	return thread->freePages(address, pageCount);
+	return _performS2C([&](const std::shared_ptr<Thread>& thread) {
+		return thread->freePages(address, pageCount);
+	});
 };
 
 uintptr_t DarlingServer::Process::mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite) {
-	auto thread = _pickS2CThread();
-
-	if (!thread) {
-		throw std::system_error(ESRCH, std::generic_category());
-	}
-
-	return thread->mapFile(fd, pageCount, protection, addressHint, pageOffset, fixed, overwrite);
+	return _performS2C([&](const std::shared_ptr<Thread>& thread) {
+		return thread->mapFile(fd, pageCount, protection, addressHint, pageOffset, fixed, overwrite);
+	});
 };
 
 void DarlingServer::Process::changeProtection(uintptr_t address, size_t pageCount, int protection) {
-	auto thread = _pickS2CThread();
-
-	if (!thread) {
-		throw std::system_error(ESRCH, std::generic_category());
-	}
-
-	return thread->changeProtection(address, pageCount, protection);
+	return _performS2C([&](const std::shared_ptr<Thread>& thread) {
+		return thread->changeProtection(address, pageCount, protection);
+	});
 };
 
 void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync_flags) {
-	auto thread = _pickS2CThread();
-
-	if (!thread) {
-		throw std::system_error(ESRCH, std::generic_category());
-	}
-
-	return thread->syncMemory(address, size, sync_flags);
+	return _performS2C([&](const std::shared_ptr<Thread>& thread) {
+		return thread->syncMemory(address, size, sync_flags);
+	});
 };
 
 static const std::regex memoryRegionEntryAddressRegex("([0-9a-fA-F]+)\\-([0-9a-fA-F]+)");
@@ -712,21 +806,23 @@ void DarlingServer::Process::notifyDead() {
 	// TODO: get exit status
 	_notifyListeningKqchannels(NOTE_EXIT, 0);
 
-	dtape_task_dying(_dtapeTask);
-
 	// notify all our threads that we're dead
 	for (auto [id, maybeThread]: threads) {
 		auto thread = maybeThread.lock();
 		if (!thread) {
 			continue;
 		}
-		thread->notifyDead();
+		thread->notifyProcessDead(); // x86Code (willi/darlingserver#10)
 	}
 
 	// schedule the duct-taped task to be released
 	// dtape_thread_release needs a microthread context, so we call it within a kernel microthread
 	// also destroy the fork-wait semaphore here
 	Thread::kernelAsync([self = shared_from_this()]() {
+		// x86Code: (willi/darlingserver#3) its threads are dead: terminate the task's IPC now, as XNU does
+		// (ipc_space_terminate can block, so this needs the microthread context)
+		dtape_task_dying(self->_dtapeTask);
+
 		if (self->_dtapeForkWaitSemaphore) {
 			dtape_semaphore_destroy(self->_dtapeForkWaitSemaphore);
 			self->_dtapeForkWaitSemaphore = nullptr;

@@ -47,6 +47,8 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <vector>
+#include <utility> // x86Code
+#include <atomic> // x86Code
 
 // 64KiB should be enough for us
 #define THREAD_STACK_SIZE (64 * 1024ULL)
@@ -219,15 +221,14 @@ DarlingServer::Thread::~Thread() noexcept(false) {
 	}
 
 	std::unique_lock lock(_process->_rwlock);
-	auto it = _process->_threads.begin();
-	while (it != _process->_threads.end()) {
-		if (it->first == _nstid) {
-			break;
-		}
-		++it;
-	}
-	if (it == _process->_threads.end()) {
-		throw std::runtime_error("Thread was not registered with Process");
+	// x86Code (willi/darlingserver#10): a newer thread with the same TID (Linux reused it before this one's release, which
+	// is later now) may have replaced this one's entry, and may even have gone already: then it isn't ours to erase.
+	// Compared by owner, as our own weak pointer has expired by now.
+	auto it = _process->_threads.find(_nstid);
+	auto self = weak_from_this();
+	if (it == _process->_threads.end() || it->second.owner_before(self) || self.owner_before(it->second)) {
+		threadLog.debug() << *this << ": its entry was replaced by a newer thread with its TID" << threadLog.endLog;
+		return;
 	}
 	_process->_threads.erase(it);
 
@@ -264,20 +265,22 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Thread::pendingCall() const 
 	return _pendingCall;
 };
 
-void DarlingServer::Thread::setPendingCall(std::shared_ptr<Call> newPendingCall) {
+bool DarlingServer::Thread::setPendingCall(std::shared_ptr<Call> newPendingCall) {
 	std::unique_lock lock(_rwlock);
 	if (newPendingCall && _pendingCall) {
 		if (newPendingCall->number() == Call::Number::InterruptEnter) {
 			// InterruptEnter calls can occur after we receive a call but before we start processing it,
 			// so we need to handle this case gracefully. we do so by saving the interrupt and scheduling
 			// it to be processed once the pending call becomes active and suspends or exits.
+			// x86Code (willi #13): doWork() schedules it then; the caller mustn't schedule the thread for it now
 			_pendingInterrupts.push(newPendingCall);
-			return;
+			return false;
 		} else {
 			throw std::runtime_error("Thread's pending call overwritten while active");
 		}
 	}
 	_pendingCall = newPendingCall;
+	return true;
 };
 
 std::shared_ptr<DarlingServer::Call> DarlingServer::Thread::activeCall() const {
@@ -392,12 +395,19 @@ void DarlingServer::Thread::microthreadContinuation() {
 	__builtin_unreachable();
 };
 
+bool DarlingServer::Thread::claimScheduling() {
+	return !_scheduled.exchange(true);
+};
+
 void DarlingServer::Thread::doWork() {
 	// NOTE: this method MUST NOT use any local variables that require destructors.
 	//       this method is actually major UB because the compiler is free to do whatever it likes with the stack,
 	//       but we know what reasonable compilers (i.e. GCC and Clang) do with it and we're specifically targeting Clang, so it's okay for us.
 
 	_rwlock.lock();
+
+	// x86Code (willi/darlingserver#13): off the work queue now; cleared under _rwlock (don't move it out)
+	_scheduled = false;
 
 	if (_deferralState != DeferralState::NotDeferred) {
 		microthreadLog.debug() << _tid << "(" << _nstid << "): execution was deferred" << microthreadLog.endLog;
@@ -571,6 +581,11 @@ doneWorking:
 			_pendingCall = _pendingInterrupts.front();
 			_pendingInterrupts.pop();
 
+			Server::sharedInstance().scheduleThread(shared_from_this());
+		}
+		else if (!_terminating && !_dead && _pendingCall && !_pendingCallOverride) {
+			// x86Code (willi/darlingserver#13 W1): a call that came in while this one ran may have found the thread
+			// still running; nothing else would run it. The claim drops this if its own entry hasn't started.
 			Server::sharedInstance().scheduleThread(shared_from_this());
 		}
 
@@ -854,7 +869,10 @@ void DarlingServer::Thread::kernelAsync(std::function<void()> fn) {
 
 	libsimple_lock_lock(&kernelAsyncRunnerQueueLock);
 	kernelAsyncRunnerQueue.push(fn);
-	if (kernelAsyncRunnersAvailable == 0) {
+	// an available runner stays counted until it takes a job, so compare against the queued jobs, not 0: with one
+	// runner available and two jobs queued, the second job would otherwise wait for the first to finish, forever if
+	// the first waits on the second
+	if (kernelAsyncRunnerQueue.size() > kernelAsyncRunnersAvailable) {
 		// we need to get some work done, but there are no workers available.
 		// if we have less workers than the max permanent number of workers,
 		// let's spawn a permanent worker. otherwise, just spawn a temporary worker.
@@ -1007,13 +1025,36 @@ void DarlingServer::Thread::setPendingCallOverride(bool pendingCallOverride) {
 
 static DarlingServer::Log s2cLog("s2c");
 
+// x86Code: ids for Thread::_s2cRequest (0 is none) (willi/darlingserver#14)
+static std::atomic<uint64_t> s2cRequestCounter{0};
+
 std::optional<DarlingServer::Message> DarlingServer::Thread::_s2cPerform(Message&& call, dserver_s2c_msgnum_t expectedReplyNumber, size_t expectedReplySize) {
 	std::optional<Message> reply = std::nullopt;
 	bool usingInterrupt = false;
 
+	// x86Code (willi/darlingserver#10): the thread may die while we wait for it, and its release destroys these, which
+	// ends our waits. Retained, they stay valid here until we're done with them.
+	struct RetainedSemaphore {
+		dtape_semaphore_t* semaphore = nullptr;
+		~RetainedSemaphore() { if (semaphore) dtape_semaphore_release(semaphore); };
+	} performSemaphore, replySemaphore, enterSemaphore, exitSemaphore;
+	{
+		std::shared_lock lock(_rwlock);
+		if (_dead || !_s2cPerformSempahore || !_s2cReplySempahore || !_s2cInterruptEnterSemaphore || !_s2cInterruptExitSemaphore) {
+			throw std::system_error(ESRCH, std::generic_category(), "S2C call to a thread that has died");
+		}
+		for (auto [retained, semaphore]: { std::pair{&performSemaphore, _s2cPerformSempahore}, std::pair{&replySemaphore, _s2cReplySempahore}, std::pair{&enterSemaphore, _s2cInterruptEnterSemaphore}, std::pair{&exitSemaphore, _s2cInterruptExitSemaphore} }) {
+			dtape_semaphore_retain(semaphore);
+			retained->semaphore = semaphore;
+		}
+	}
+
 	// make sure we're the only one performing an S2C call on this thread
-	if (!dtape_semaphore_down_simple(_s2cPerformSempahore)) {
+	if (!dtape_semaphore_down_simple(performSemaphore.semaphore)) {
 		// got interrupted while waiting
+		if (isDead()) {
+			throw std::system_error(ESRCH, std::generic_category(), "S2C call to a thread that has died");
+		}
 		return std::nullopt;
 	}
 
@@ -1022,16 +1063,62 @@ std::optional<DarlingServer::Message> DarlingServer::Thread::_s2cPerform(Message
 	{
 		std::unique_lock lock(_rwlock);
 
-		if (!_activeCall) {
+		// x86Code (willi/darlingserver#14): mldr's checkin and thread-exit checkout get the signal, as mldr's RPC hooks
+		// abort on an S2C call; libsystem's checkin and checkout (fork child, exec) serve one inline
+		bool inMldrCall = _activeCall && _activeCall->madeByMldr();
+
+		if (!_activeCall || inMldrCall) {
 			// signal the thread that we want to perform an S2C call and wait for it to give us the green light
+			if (_s2cInterruptEnterSemaphore != enterSemaphore.semaphore) {
+				// it died since we retained them (notifyDead()), or an exec swapped them
+				const bool dead = _dead;
+				lock.unlock();
+				dtape_semaphore_up(performSemaphore.semaphore);
+				if (dead) {
+					throw std::system_error(ESRCH, std::generic_category(), "S2C call to a thread that died before taking it");
+				}
+				return std::nullopt;
+			}
+			// the request S2CPerform takes; withdrawn below if we stop waiting
+			const uint64_t request = ++s2cRequestCounter;
+			_s2cRequest = request;
 			lock.unlock();
 			s2cLog.debug() << *this << ": Sending S2C signal" << s2cLog.endLog;
 			usingInterrupt = true;
-			sendSignal(LINUX_SIGRTMIN + 1);
-			if (!dtape_semaphore_down_simple(_s2cInterruptEnterSemaphore)) {
-				// got interrupted while waiting
-				dtape_semaphore_up(_s2cPerformSempahore);
-				return std::nullopt;
+			try {
+				sendSignal(LINUX_SIGRTMIN + 1);
+			} catch (...) {
+				lock.lock();
+				if (_s2cRequest == request) {
+					_s2cRequest = 0;
+				}
+				lock.unlock();
+				// the next S2C call to this thread must not wait for ever for the perform semaphore
+				dtape_semaphore_up(performSemaphore.semaphore);
+				throw;
+			}
+			// a thread that dies without taking the signal never gives the green light: notifyDead() destroys the
+			// enter semaphore, which ends this wait (as do the release and an exec's swap)
+			if (!dtape_semaphore_down_simple(enterSemaphore.semaphore)) {
+				lock.lock();
+				const bool taken = _s2cTaken == request;
+				if (_s2cRequest == request) {
+					_s2cRequest = 0;
+				}
+				lock.unlock();
+				// S2CPerform took it (it raises this semaphore next, unless it's gone): wait for that green light
+				if (!(taken && dtape_semaphore_down_simple(enterSemaphore.semaphore))) {
+					if (taken) {
+						// S2CPerform waits for us
+						dtape_semaphore_up(exitSemaphore.semaphore);
+					}
+					dtape_semaphore_up(performSemaphore.semaphore);
+					if (isDead()) {
+						// it never got the call: another thread can take it (Process::_performS2C())
+						throw std::system_error(ESRCH, std::generic_category(), "S2C call to a thread that died before taking it");
+					}
+					return std::nullopt;
+				}
 			}
 			s2cLog.debug() << *this << ": Got green light to perform S2C call" << s2cLog.endLog;
 			lock.lock();
@@ -1048,7 +1135,10 @@ std::optional<DarlingServer::Message> DarlingServer::Thread::_s2cPerform(Message
 	// at least for now, in order to wait for the S2C reply, we need the calling thread to be a microthread,
 	// so that waiting on the duct-taped semaphore will work
 	if (!currentThread()) {
-		dtape_semaphore_up(_s2cPerformSempahore);
+		dtape_semaphore_up(performSemaphore.semaphore);
+		if (usingInterrupt) {
+			dtape_semaphore_up(exitSemaphore.semaphore); // x86Code: don't leave the client in its S2C interrupt
+		}
 		throw std::runtime_error("Must be in a microthread (any microthread) to wait for S2C reply");
 	}
 
@@ -1058,9 +1148,38 @@ std::optional<DarlingServer::Message> DarlingServer::Thread::_s2cPerform(Message
 	Server::sharedInstance().sendMessage(std::move(call));
 
 	// now let's wait for the reply
-	if (!dtape_semaphore_down_simple(_s2cReplySempahore)) {
-		// got interrupted while waiting
-		dtape_semaphore_up(_s2cPerformSempahore);
+	if (!dtape_semaphore_down_simple(replySemaphore.semaphore)) {
+		// x86Code: interrupted (or the thread is gone) after the call went out. The client still answers it. Before, its
+		// late reply sat in _s2cReply (with the semaphore raised): the next S2C call took it as its own, that call's
+		// reply was the "duplicate" and was dropped, and with the signal path the client was left waiting in its
+		// S2C interrupt for ever (exit semaphore never raised). Now a reply already here is discarded, else the late one
+		// is marked to be dropped on arrival; deferred replies go out; the client is let go.
+		bool replyHere;
+		{
+			std::unique_lock lock(_rwlock);
+			replyHere = !!_s2cReply;
+			if (replyHere) {
+				_s2cReply = std::nullopt;
+			} else {
+				_s2cAbandonedReplies++;
+			}
+			if (_deferReplyForS2C) {
+				_deferReplyForS2C = false;
+				if (_deferredReply) {
+					Server::sharedInstance().sendMessage(std::move(*_deferredReply));
+					_deferredReply = std::nullopt;
+				}
+			}
+		}
+		if (replyHere) {
+			// its up-count is (or is about to be) there: take it, so the next call doesn't return on it
+			dtape_semaphore_down_simple(replySemaphore.semaphore);
+		}
+		s2cLog.warning() << *this << ": S2C call interrupted after it was sent; " << (replyHere ? "discarded its reply" : "its late reply will be dropped") << s2cLog.endLog;
+		dtape_semaphore_up(performSemaphore.semaphore);
+		if (usingInterrupt) {
+			dtape_semaphore_up(exitSemaphore.semaphore);
+		}
 		return std::nullopt;
 	}
 
@@ -1072,7 +1191,7 @@ std::optional<DarlingServer::Message> DarlingServer::Thread::_s2cPerform(Message
 
 		if (!_s2cReply) {
 			// impossible, but just in case
-			dtape_semaphore_up(_s2cPerformSempahore);
+			dtape_semaphore_up(performSemaphore.semaphore);
 			throw std::runtime_error("S2C reply semaphore incremented, but no reply present");
 		}
 
@@ -1092,13 +1211,13 @@ std::optional<DarlingServer::Message> DarlingServer::Thread::_s2cPerform(Message
 	s2cLog.debug() << *this << ": Done performing S2C call" << s2cLog.endLog;
 
 	// we're done performing the call; allow others to have a chance at performing an S2C call on this thread
-	dtape_semaphore_up(_s2cPerformSempahore);
+	dtape_semaphore_up(performSemaphore.semaphore);
 
 	if (usingInterrupt) {
 		// if we used the S2C signal to perform the call, then the s2c_perform call is currently waiting for us to finish;
 		// let it know that we're done
 		s2cLog.debug() << *this << ": Allowing thread to resume from S2C interrupt" << s2cLog.endLog;
-		dtape_semaphore_up(_s2cInterruptExitSemaphore);
+		dtape_semaphore_up(exitSemaphore.semaphore);
 	}
 
 	// partially validate the reply
@@ -1260,7 +1379,13 @@ uintptr_t DarlingServer::Thread::allocatePages(size_t pageCount, int protection,
 	} else if (fixed) {
 		flags |= MAP_FIXED_NOREPLACE;
 	}
-	auto result = _mmap(addressHint, pageCount * sysconf(_SC_PAGESIZE), protection, flags, -1, 0, err);
+	// x86Code: an S2C call that is interrupted fails with EINTR (see _mmap); try again, as for mapFile()
+	auto result = (uintptr_t)MAP_FAILED;
+	for (int attempt = 0; attempt < 8; ++attempt) {
+		result = _mmap(addressHint, pageCount * sysconf(_SC_PAGESIZE), protection, flags, -1, 0, err);
+		if (result != (uintptr_t)MAP_FAILED || err != EINTR) break;
+		s2cLog.warning() << *this << ": S2C mmap interrupted, retrying" << s2cLog.endLog;
+	}
 	if (result == (uintptr_t)MAP_FAILED) {
 		throw std::system_error(err, std::generic_category(), "S2C mmap call failed");
 	}
@@ -1282,7 +1407,17 @@ uintptr_t DarlingServer::Thread::mapFile(int fd, size_t pageCount, int protectio
 	} else if (fixed) {
 		flags |= MAP_FIXED_NOREPLACE;
 	}
-	auto result = _mmap(addressHint, pageCount * sysconf(_SC_PAGESIZE), protection, flags, fd, pageOffset * sysconf(_SC_PAGESIZE), err);
+	// x86Code: an S2C call that is interrupted (the thread took a signal, or the wait ended early) fails with EINTR, and
+	// mach_vm_map() of a memory entry failed with it: a shared-memory map (xpc_shmem_map) in another process returned 0
+	// now and then (WebKit's GPU process: "Failed to map IOSurface into user address space", FINDINGS 3.10/3.11).
+	// XNU's vm_map doesn't fail that way. Try again; a late reply of an abandoned call is dropped (its mapping, if the
+	// client still made one, stays unused).
+	auto result = (uintptr_t)MAP_FAILED;
+	for (int attempt = 0; attempt < 8; ++attempt) {
+		result = _mmap(addressHint, pageCount * sysconf(_SC_PAGESIZE), protection, flags, fd, pageOffset * sysconf(_SC_PAGESIZE), err);
+		if (result != (uintptr_t)MAP_FAILED || err != EINTR) break;
+		s2cLog.warning() << *this << ": S2C mmap interrupted, retrying" << s2cLog.endLog;
+	}
 	if (result == (uintptr_t)MAP_FAILED) {
 		throw std::system_error(err, std::generic_category(), "S2C mmap call failed");
 	}
@@ -1449,6 +1584,8 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
 
 void DarlingServer::Thread::notifyDead() {
 	bool canRelease = false;
+	dtape_semaphore_t* enterSemaphore = nullptr; // x86Code (willi/darlingserver#14)
+	dtape_thread_t* semaphoreOwner = nullptr;
 
 	{
 		std::unique_lock lock(_rwlock);
@@ -1465,6 +1602,23 @@ void DarlingServer::Thread::notifyDead() {
 			_terminating = true;
 			canRelease = true;
 		}
+
+		// x86Code (willi/darlingserver#14): a dead thread never gives an S2C call the green light, and its release may wait
+		// for its process: destroying the enter semaphore ends a waiting call at once, and it goes to another thread
+		// (Process::_performS2C()). Destroyed only while a reference to the semaphores' task is held: this job holds
+		// one to the duct-taped thread (and so its task) until it's done.
+		enterSemaphore = std::exchange(_s2cInterruptEnterSemaphore, nullptr);
+		if (enterSemaphore) {
+			semaphoreOwner = _dtapeThread;
+			dtape_thread_retain(semaphoreOwner);
+		}
+	}
+
+	if (enterSemaphore) {
+		kernelAsync([enterSemaphore, semaphoreOwner]() {
+			dtape_semaphore_destroy(enterSemaphore);
+			dtape_thread_release(semaphoreOwner);
+		});
 	}
 
 	// keep ourselves alive until the duct-taped context is done
@@ -1491,26 +1645,51 @@ void DarlingServer::Thread::_dispose() {
 	_selfReference = nullptr;
 };
 
+void DarlingServer::Thread::notifyProcessDead() {
+	// x86Code (willi/darlingserver#10)
+	notifyDead();
+
+	bool release;
+	{
+		std::unique_lock lock(_rwlock);
+		// dead before its process, and back at the top of its microthread (neither running nor suspended in its call):
+		// nothing will run it again, and doneWorking didn't release it, as its call was left active
+		release = _dead && !_running && !_suspended && !_releaseScheduled && _activeCall;
+	}
+	if (release) {
+		threadLog.debug() << *this << ": died before its process; releasing it with the process" << threadLog.endLog;
+		_scheduleRelease();
+	}
+};
+
 void DarlingServer::Thread::_scheduleRelease() {
+	{
+		// x86Code (willi/darlingserver#10): once: both doneWorking and notifyProcessDead() may get here
+		std::unique_lock lock(_rwlock);
+		if (_releaseScheduled) {
+			return;
+		}
+		_releaseScheduled = true;
+	}
+
 	// schedule the duct-taped thread to be released
 	// dtape_thread_release needs a microthread context, so we call it within a kernel microthread
 	threadLog.debug() << *this << ": scheduling release" << threadLog.endLog;
 	kernelAsync([self = shared_from_this()]() {
-		if (self->_s2cPerformSempahore) {
-			dtape_semaphore_destroy(self->_s2cPerformSempahore);
-			self->_s2cPerformSempahore = nullptr;
+		// x86Code (willi/darlingserver#10): taken under the lock, as _s2cPerform() retains them; destroying one ends
+		// its waits there
+		dtape_semaphore_t* semaphores[4];
+		{
+			std::unique_lock lock(self->_rwlock);
+			semaphores[0] = std::exchange(self->_s2cPerformSempahore, nullptr);
+			semaphores[1] = std::exchange(self->_s2cReplySempahore, nullptr);
+			semaphores[2] = std::exchange(self->_s2cInterruptEnterSemaphore, nullptr);
+			semaphores[3] = std::exchange(self->_s2cInterruptExitSemaphore, nullptr);
 		}
-		if (self->_s2cReplySempahore) {
-			dtape_semaphore_destroy(self->_s2cReplySempahore);
-			self->_s2cReplySempahore = nullptr;
-		}
-		if (self->_s2cInterruptEnterSemaphore) {
-			dtape_semaphore_destroy(self->_s2cInterruptEnterSemaphore);
-			self->_s2cInterruptEnterSemaphore = nullptr;
-		}
-		if (self->_s2cInterruptExitSemaphore) {
-			dtape_semaphore_destroy(self->_s2cInterruptExitSemaphore);
-			self->_s2cInterruptExitSemaphore = nullptr;
+		for (auto semaphore: semaphores) {
+			if (semaphore) {
+				dtape_semaphore_destroy(semaphore);
+			}
 		}
 		dtape_thread_release(self->_dtapeThread);
 		self->_dtapeThread = nullptr;

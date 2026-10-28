@@ -28,6 +28,7 @@
 #include <sys/fcntl.h>
 #include <sys/syscall.h>
 #include <darlingserver/kqchan.hpp>
+#include <utility> // x86Code
 
 static DarlingServer::Log callLog("calls");
 
@@ -130,17 +131,39 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
 	if (header->number == dserver_callnum_s2c) {
 		// this is an S2C reply
 
+		// x86Code (willi/darlingserver#10): taken under the lock (a released thread has none) and retained
+		dtape_semaphore_t* replySemaphore;
 		{
 			std::unique_lock lock(thread->_rwlock);
 
+			if (thread->_s2cAbandonedReplies > 0) {
+				// x86Code: the reply to an S2C call whose caller stopped waiting after sending it (Thread::_s2cPerform()).
+				// Taken as the next call's reply, it was that call's "duplicate"; the next call's own reply was dropped,
+				// and its caller got another call's answer (or none, and its thread hung in its S2C interrupt).
+				thread->_s2cAbandonedReplies--;
+				callLog.warning() << *thread << ": dropped the late reply of an abandoned S2C call" << callLog.endLog;
+				return nullptr;
+			}
+
 			if (thread->_s2cReply) {
-				throw std::runtime_error("Received S2C reply but thread already had one pending");
+				// x86Code: a client's second S2C reply is its protocol error: drop it instead of throwing out of the
+				// main loop and taking every process down with darlingserver (as willi/darlingserver#7 contains it;
+				// seen once Swift's cooperative pool made workqueue threads come and go much more often)
+				callLog.error() << *thread << ": Received S2C reply but thread already had one pending; dropped it" << callLog.endLog;
+				return nullptr;
 			}
 
 			thread->_s2cReply = std::move(requestMessage);
+			replySemaphore = thread->_s2cReplySempahore;
+			if (replySemaphore) {
+				dtape_semaphore_retain(replySemaphore);
+			}
 		}
 
-		dtape_semaphore_up(thread->_s2cReplySempahore);
+		if (replySemaphore) {
+			dtape_semaphore_up(replySemaphore);
+			dtape_semaphore_release(replySemaphore);
+		}
 
 		return nullptr;
 	} else if (header->number == dserver_callnum_push_reply) {
@@ -214,8 +237,20 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
 
 	#undef CALL_CASE
 
+	// x86Code (willi/darlingserver#14): Thread::_s2cPerform() gives mldr's checkin and thread-exit checkout the S2C
+	// signal (mldr's RPC hooks abort on an S2C call); libsystem's (fork child's checkin, exec's checkout) serve it inline.
+	if (auto checkin = std::dynamic_pointer_cast<Checkin>(result)) {
+		result->_madeByMldr = !checkin->_body.is_fork;
+	} else if (auto checkout = std::dynamic_pointer_cast<Checkout>(result)) {
+		result->_madeByMldr = checkout->_body.exec_listener_pipe < 0;
+	}
+
 	if (thread) {
-		thread->setPendingCall(result);
+		// x86Code (willi/darlingserver#13): a call queued behind the pending one is scheduled when that one is done
+		if (!thread->setPendingCall(result)) {
+			callLog.debug() << *thread << ": Call queued behind the pending call" << callLog.endLog;
+			return nullptr;
+		}
 		return result;
 	} else {
 		Thread::kernelAsync([result]() {
@@ -380,6 +415,16 @@ void DarlingServer::Call::Checkout::processCall() {
 		code = -ESRCH;
 	}
 
+	// x86Code (willi/darlingserver#10): the call is over. A dead thread with no active call is released when it returns
+	// to the top of its microthread (doneWorking); with `_thread` reset below, the reply no longer deactivated it, and a
+	// checked-out thread stayed for ever (its duct-taped thread still in task_threads(), its stack). Not the main thread:
+	// mldr parks its Linux thread and the process lives on; it is released with the process (notifyProcessDead()).
+	// `self` keeps the call (the thread's active call held the only reference) until the reply is sent.
+	std::shared_ptr<Call> self;
+	if (auto thread = _thread.lock(); thread && (self = thread->activeCall()).get() == this && thread->process() && thread->id() != thread->process()->id()) {
+		thread->deactivateCall(self);
+	}
+
 	// clear the thread pointer so that the reply will be sent directly through the server
 	// (otherwise, we would attempt to send it through the thread, which is now dead)
 	_thread.reset();
@@ -417,6 +462,31 @@ void DarlingServer::Call::VchrootPath::processCall() {
 void DarlingServer::Call::TaskSelfTrap::processCall() {
 	const auto taskSelfPort = dtape_task_self_trap();
 	_sendReply(0, taskSelfPort);
+};
+
+// x86Code: fileports (see dtape_fileport_makeport)
+void DarlingServer::Call::FileportMakeport::processCall() {
+	uint32_t name = 0;
+	int code = dtape_fileport_makeport(_body.fd, &name);
+	if (code == 0) {
+		_body.fd = -1; // the fileport owns it now
+	}
+	_sendReply(code, name);
+};
+
+void DarlingServer::Call::FileportMakefd::processCall() {
+	int fd = -1;
+	int code = dtape_fileport_makefd(_body.port_name, &fd);
+	_sendReply(code, fd); // the reply message closes our copy once sent
+};
+
+// x86Code: see dtape_memfd_for_region
+void DarlingServer::Call::X86CodeMemfdForRegion::processCall() {
+	int fd = -1;
+	uint64_t offset = 0;
+	uint32_t shared = 0;
+	int code = dtape_memfd_for_region(_body.address, _body.size, &fd, &offset, &shared);
+	_sendReply(code, fd, offset, shared); // the reply message closes our copy once sent
 };
 
 void DarlingServer::Call::HostSelfTrap::processCall() {
@@ -876,6 +946,23 @@ void DarlingServer::Call::StopAfterExec::processCall() {
 	_sendReply(code);
 };
 
+// x86Code: see Process::setSpawnExec
+void DarlingServer::Call::SpawnExec::processCall() {
+	int code = 0;
+
+	if (auto thread = _thread.lock()) {
+		if (auto process = thread->process()) {
+			process->setSpawnExec(true);
+		} else {
+			code = -ESRCH;
+		}
+	} else {
+		code = -ESRCH;
+	}
+
+	_sendReply(code);
+};
+
 void DarlingServer::Call::SetTracer::processCall() {
 	int code = 0;
 	std::shared_ptr<Process> targetProcess = nullptr;
@@ -980,8 +1067,31 @@ void DarlingServer::Call::S2CPerform::processCall() {
 	int code = 0;
 
 	if (auto thread = _thread.lock()) {
-		dtape_semaphore_up(thread->_s2cInterruptEnterSemaphore);
-		dtape_semaphore_down_simple(thread->_s2cInterruptExitSemaphore);
+		callLog.debug() << *thread << ": s2c_perform: giving green light" << callLog.endLog; // x86Code
+		// x86Code (willi/darlingserver#14): the request this green light answers, taken with the two semaphores under
+		// the lock and retained (notifyDead() and the release destroy them). With no request, the signal is stale: nothing
+		// waits for this green light, so it's answered at once.
+		dtape_semaphore_t* enterSemaphore = nullptr;
+		dtape_semaphore_t* exitSemaphore = nullptr;
+		{
+			std::unique_lock lock(thread->_rwlock);
+			if (thread->_s2cRequest != 0 && thread->_s2cInterruptEnterSemaphore && thread->_s2cInterruptExitSemaphore) {
+				thread->_s2cTaken = std::exchange(thread->_s2cRequest, 0);
+				enterSemaphore = thread->_s2cInterruptEnterSemaphore;
+				exitSemaphore = thread->_s2cInterruptExitSemaphore;
+				dtape_semaphore_retain(enterSemaphore);
+				dtape_semaphore_retain(exitSemaphore);
+			}
+		}
+		if (enterSemaphore) {
+			dtape_semaphore_up(enterSemaphore);
+			dtape_semaphore_down_simple(exitSemaphore);
+			dtape_semaphore_release(enterSemaphore);
+			dtape_semaphore_release(exitSemaphore);
+		} else {
+			callLog.warning() << *thread << ": s2c_perform: stale S2C signal, no request" << callLog.endLog;
+		}
+		callLog.debug() << *thread << ": s2c_perform: resuming" << callLog.endLog; // x86Code
 	} else {
 		code = -ESRCH;
 	}

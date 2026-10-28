@@ -53,6 +53,8 @@ dtape_thread_t* dtape_thread_create(dtape_task_t* task, uint64_t nsid, void* con
 	thread->processing_signal = false;
 	thread->name = NULL;
 	thread->waiting_suspended = false;
+	thread->off_task_list = false; // x86Code (willi/darlingserver#10)
+	libsimple_lock_init(&thread->wake_lock);
 	LIST_INIT(&thread->user_states);
 	dtape_mutex_init(&thread->suspension_mutex);
 	dtape_condvar_init(&thread->suspension_condvar);
@@ -148,10 +150,12 @@ void dtape_thread_destroy(dtape_thread_t* thread) {
 
 	lck_mtx_destroy(&thread->xnu_thread.mutex, LCK_GRP_NULL);
 
-	// remove this thread from the task's thread list
+	// remove this thread from the task's thread list, unless dtape_thread_dying() has (x86Code, willi/darlingserver#10)
 	task_lock(thread->xnu_thread.task);
-	queue_remove(&thread->xnu_thread.task->threads, &thread->xnu_thread, thread_t, task_threads);
-	thread->xnu_thread.task->thread_count--;
+	if (!thread->off_task_list) {
+		queue_remove(&thread->xnu_thread.task->threads, &thread->xnu_thread, thread_t, task_threads);
+		thread->xnu_thread.task->thread_count--;
+	}
 	task_unlock(thread->xnu_thread.task);
 
 	task_deallocate(thread->xnu_thread.task);
@@ -161,15 +165,18 @@ void dtape_thread_destroy(dtape_thread_t* thread) {
 	free(thread);
 };
 
+// `state` is changed atomically here and in thread_unblock(), which another OS thread runs while this one enters or
+// exits: a plain read-modify-write could undo its update (bringing TH_WAIT back). The thread lock can't be taken here:
+// our callers hold the thread's _rwlock, which thread_unblock() takes (to resume us) with the thread lock held.
 void dtape_thread_entering(dtape_thread_t* thread) {
 	// if the thread is entering, it cannot be waiting
-	thread->xnu_thread.state &= ~(TH_WAIT | TH_UNINT);
-	thread->xnu_thread.state |= TH_RUN;
+	__atomic_and_fetch(&thread->xnu_thread.state, ~(TH_WAIT | TH_UNINT), __ATOMIC_SEQ_CST);
+	__atomic_or_fetch(&thread->xnu_thread.state, TH_RUN, __ATOMIC_SEQ_CST);
 	thread->xnu_thread.block_hint = kThreadWaitNone;
 };
 
 void dtape_thread_exiting(dtape_thread_t* thread) {
-	thread->xnu_thread.state &= ~TH_RUN;
+	__atomic_and_fetch(&thread->xnu_thread.state, ~TH_RUN, __ATOMIC_SEQ_CST);
 };
 
 void dtape_thread_set_handles(dtape_thread_t* thread, uintptr_t pthread_handle, uintptr_t dispatch_qaddr) {
@@ -468,6 +475,17 @@ void dtape_thread_dying(dtape_thread_t* thread) {
 	thread->xnu_thread.wait_result = THREAD_INTERRUPTED;
 	clear_wait_internal(&thread->xnu_thread, THREAD_INTERRUPTED);
 	thread_unlock(&thread->xnu_thread);
+
+	// x86Code (willi/darlingserver#10): off its task's thread list, as XNU's thread_terminate_daemon() takes a terminated
+	// thread: task_threads() no longer lists it. A dead thread kept until its process dies is released later, and
+	// dtape_thread_destroy() then leaves the list alone.
+	task_lock(thread->xnu_thread.task);
+	if (!thread->off_task_list) {
+		queue_remove(&thread->xnu_thread.task->threads, &thread->xnu_thread, thread_t, task_threads);
+		thread->xnu_thread.task->thread_count--;
+		thread->off_task_list = true;
+	}
+	task_unlock(thread->xnu_thread.task);
 };
 
 thread_t current_thread(void) {
@@ -480,6 +498,10 @@ void (thread_reference)(thread_t thread) {
 };
 
 void thread_deallocate(thread_t xthread) {
+	// x86Code: a null thread is a no-op, as in XNU (see task_deallocate)
+	if (xthread == THREAD_NULL) {
+		return;
+	}
 	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
 	if (os_ref_release(&xthread->ref_count) > 0) {
 		return;
@@ -522,10 +544,17 @@ wait_result_t thread_block_parameter(thread_continue_t continuation, void* param
 
 	bool waiting = thread->xnu_thread.state & TH_WAIT;
 
+	// a thread_unblock() from another OS thread after we unlock but before we've suspended would find us not suspended
+	// yet, and its resume would do nothing: we'd sleep through our wakeup. So take the wake lock, which thread_unblock()
+	// resumes under, before unlocking, and have the suspension release it once we're suspended.
+	if (waiting) {
+		libsimple_lock_lock(&thread->wake_lock);
+	}
+
 	thread_unlock(&thread->xnu_thread);
 
 	if (waiting) {
-		dtape_hooks->thread_suspend(thread->context, continuation ? thread_continuation_callback : NULL, thread, NULL);
+		dtape_hooks->thread_suspend(thread->context, continuation ? thread_continuation_callback : NULL, thread, &thread->wake_lock);
 	}
 
 	thread_lock(&thread->xnu_thread);
@@ -549,7 +578,20 @@ wait_result_t thread_block(thread_continue_t continuation) {
 boolean_t thread_unblock(thread_t xthread, wait_result_t wresult) {
 	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
 	thread->xnu_thread.wait_result = wresult;
+	// as XNU does: a timed wait that ended otherwise must not time out a later wait
+	if (thread->xnu_thread.wait_timer_is_set) {
+		if (timer_call_cancel(&thread->xnu_thread.wait_timer)) {
+			thread->xnu_thread.wait_timer_active--;
+		}
+		thread->xnu_thread.wait_timer_is_set = FALSE;
+	}
+	// as XNU does: the wait is over, so a thread_block() that hasn't checked TH_WAIT yet must not suspend
+	// (atomically: see dtape_thread_entering())
+	__atomic_and_fetch(&thread->xnu_thread.state, ~(TH_WAIT | TH_UNINT), __ATOMIC_SEQ_CST);
+	__atomic_or_fetch(&thread->xnu_thread.state, TH_RUN, __ATOMIC_SEQ_CST);
+	libsimple_lock_lock(&thread->wake_lock);
 	dtape_hooks->thread_resume(thread->context);
+	libsimple_lock_unlock(&thread->wake_lock);
 	return TRUE;
 };
 
@@ -1245,7 +1287,8 @@ kern_return_t thread_info(thread_t xthread, thread_flavor_t flavor, thread_info_
 			// TODO: fill in these values properly
 			info->cpu_usage = 0;
 			info->flags = 0;
-			info->policy = 0;
+			// scheduled by Linux: a time-shared thread to XNU, as thread_policy_get() and the extended info say
+			info->policy = POLICY_TIMESHARE;
 			info->sleep_time = 0;
 			info->system_time.seconds = 0;
 			info->system_time.microseconds = 0;
@@ -1264,6 +1307,11 @@ kern_return_t thread_info(thread_t xthread, thread_flavor_t flavor, thread_info_
 				thread_state = dtape_thread_state_stopped;
 			}
 			dtape_mutex_unlock(&thread->suspension_mutex);
+
+			// the calling thread is running, though Linux sees it waiting for our reply
+			if (thread_state == -1 && xthread == current_thread()) {
+				thread_state = dtape_thread_state_running;
+			}
 
 			if (thread_state == -1) {
 				thread_state = dtape_hooks->thread_get_state(thread->context);
@@ -1292,8 +1340,66 @@ kern_return_t thread_info(thread_t xthread, thread_flavor_t flavor, thread_info_
 			return KERN_SUCCESS;
 		};
 
+		// threads are scheduled by Linux: report them as XNU's default, time-shared at the default priority
+		case THREAD_SCHED_TIMESHARE_INFO: {
+			if (*thread_info_count < POLICY_TIMESHARE_INFO_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			*thread_info_count = POLICY_TIMESHARE_INFO_COUNT;
+
+			policy_timeshare_info_t info = (policy_timeshare_info_t)thread_info_out;
+			info->max_priority = MAXPRI_USER;
+			info->base_priority = BASEPRI_DEFAULT;
+			info->cur_priority = BASEPRI_DEFAULT;
+			info->depressed = FALSE;
+			info->depress_priority = -1;
+			return KERN_SUCCESS;
+		};
+
+		case THREAD_SCHED_FIFO_INFO: {
+			if (*thread_info_count < POLICY_FIFO_INFO_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			return KERN_INVALID_POLICY;
+		};
+
+		case THREAD_SCHED_RR_INFO: {
+			if (*thread_info_count < POLICY_RR_INFO_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			return KERN_INVALID_POLICY;
+		};
+
+		case THREAD_EXTENDED_INFO: {
+			thread_basic_info_data_t basic;
+			mach_msg_type_number_t basic_count = THREAD_BASIC_INFO_COUNT;
+			kern_return_t kr;
+
+			if (*thread_info_count < THREAD_EXTENDED_INFO_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			kr = thread_info(xthread, THREAD_BASIC_INFO, (thread_info_t)&basic, &basic_count);
+			if (kr != KERN_SUCCESS) {
+				return kr;
+			}
+			*thread_info_count = THREAD_EXTENDED_INFO_COUNT;
+
+			thread_extended_info_t info = (thread_extended_info_t)thread_info_out;
+			memset(info, 0, sizeof(*info));
+			info->pth_cpu_usage = basic.cpu_usage;
+			info->pth_policy = basic.policy;
+			info->pth_run_state = basic.run_state;
+			info->pth_flags = basic.flags;
+			info->pth_sleep_time = basic.sleep_time;
+			info->pth_curpri = BASEPRI_DEFAULT;
+			info->pth_priority = BASEPRI_DEFAULT;
+			info->pth_maxpriority = MAXPRI_USER;
+			return KERN_SUCCESS;
+		};
+
+		// as XNU: a flavor it doesn't know is an invalid argument
 		default:
-			dtape_stub_unsafe("Unimplemented flavor");
+			return KERN_INVALID_ARGUMENT;
 	}
 };
 
@@ -1302,8 +1408,90 @@ kern_return_t thread_policy(thread_t thread, policy_t policy, policy_base_t base
 	return KERN_SUCCESS;
 };
 
+// threads are scheduled by Linux: every policy is XNU's default for a time-shared thread
 kern_return_t thread_policy_get(thread_t thread, thread_policy_flavor_t flavor, thread_policy_t policy_info, mach_msg_type_number_t* count, boolean_t* get_default) {
-	dtape_stub_unsafe();
+	if (thread == THREAD_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	switch (flavor) {
+		case THREAD_EXTENDED_POLICY: {
+			if (*count < THREAD_EXTENDED_POLICY_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			((thread_extended_policy_t)policy_info)->timeshare = TRUE;
+			*count = THREAD_EXTENDED_POLICY_COUNT;
+			break;
+		};
+
+		case THREAD_TIME_CONSTRAINT_POLICY: {
+			if (*count < THREAD_TIME_CONSTRAINT_POLICY_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			thread_time_constraint_policy_t info = (thread_time_constraint_policy_t)policy_info;
+			// XNU's defaults: half a 10 ms quantum to compute in, a whole one to finish by (Darling's absolute
+			// time is in nanoseconds)
+			info->period = 0;
+			info->computation = 5 * NSEC_PER_MSEC;
+			info->constraint = 10 * NSEC_PER_MSEC;
+			info->preemptible = TRUE;
+			*count = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
+			break;
+		};
+
+		case THREAD_PRECEDENCE_POLICY: {
+			if (*count < THREAD_PRECEDENCE_POLICY_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			((thread_precedence_policy_t)policy_info)->importance = 0;
+			*count = THREAD_PRECEDENCE_POLICY_COUNT;
+			break;
+		};
+
+		case THREAD_AFFINITY_POLICY: {
+			if (*count < THREAD_AFFINITY_POLICY_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			((thread_affinity_policy_t)policy_info)->affinity_tag = THREAD_AFFINITY_TAG_NULL;
+			*count = THREAD_AFFINITY_POLICY_COUNT;
+			break;
+		};
+
+		case THREAD_LATENCY_QOS_POLICY: {
+			if (*count < THREAD_LATENCY_QOS_POLICY_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			((thread_latency_qos_policy_t)policy_info)->thread_latency_qos_tier = LATENCY_QOS_TIER_UNSPECIFIED;
+			*count = THREAD_LATENCY_QOS_POLICY_COUNT;
+			break;
+		};
+
+		case THREAD_THROUGHPUT_QOS_POLICY: {
+			if (*count < THREAD_THROUGHPUT_QOS_POLICY_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			((thread_throughput_qos_policy_t)policy_info)->thread_throughput_qos_tier = THROUGHPUT_QOS_TIER_UNSPECIFIED;
+			*count = THREAD_THROUGHPUT_QOS_POLICY_COUNT;
+			break;
+		};
+
+		case THREAD_QOS_POLICY: {
+			if (*count < THREAD_QOS_POLICY_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			thread_qos_policy_t info = (thread_qos_policy_t)policy_info;
+			info->qos_tier = THREAD_QOS_UNSPECIFIED;
+			info->tier_importance = 0;
+			*count = THREAD_QOS_POLICY_COUNT;
+			break;
+		};
+
+		default:
+			return KERN_INVALID_ARGUMENT;
+	}
+
+	*get_default = TRUE;
+	return KERN_SUCCESS;
 };
 
 kern_return_t thread_policy_set(thread_t thread, thread_policy_flavor_t flavor, thread_policy_t policy_info, mach_msg_type_number_t count) {
@@ -1350,7 +1538,9 @@ static wait_result_t thread_handoff_internal(thread_t thread, thread_continue_t 
 	return thread_block_parameter(continuation, parameter);
 };
 
-void thread_hold(thread_t xthread) {
+// Holds `xthread`; answers false, holding nothing, when its Linux thread is gone (it exited without darlingserver
+// noticing yet): nothing would ever acknowledge the suspension, and thread_wait() would wait for ever.
+static bool dtape_thread_hold(thread_t xthread) {
 	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
 	dtape_log_debug("sigexc: thread_hold(%p)\n", xthread);
 	// CHECKME: the LKM was always sending the signal whenever thread_hold got called;
@@ -1358,8 +1548,16 @@ void thread_hold(thread_t xthread) {
 	if (xthread->suspend_count++ == 0) {
 		// This signal leads to sigexc.c which will end up calling darlingserver;
 		// darlingserver will hold the caller so long as the suspend_count > 0.
-		dtape_hooks->thread_send_signal(thread->context, LINUX_SIGRTMIN);
+		if (dtape_hooks->thread_send_signal(thread->context, LINUX_SIGRTMIN) == -ESRCH) {
+			xthread->suspend_count--;
+			return false;
+		}
 	}
+	return true;
+};
+
+void thread_hold(thread_t xthread) {
+	(void)dtape_thread_hold(xthread);
 };
 
 void thread_release(thread_t xthread) {
@@ -1958,7 +2156,15 @@ thread_suspend(thread_t thread)
 
 	if (thread->active) {
 		if (thread->user_stop_count++ == 0) {
+#ifdef __DARLING__
+			// a thread whose Linux thread is gone is as good as terminated
+			if (!dtape_thread_hold(thread)) {
+				thread->user_stop_count--;
+				result = KERN_TERMINATED;
+			}
+#else
 			thread_hold(thread);
+#endif
 		}
 	} else {
 		result = KERN_TERMINATED;

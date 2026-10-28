@@ -69,6 +69,10 @@ LCK_GRP_DECLARE(timer_call_lck_grp, "timer_call");
 LCK_GRP_DECLARE(timer_longterm_lck_grp, "timer_longterm");
 
 /* Timer queue lock must be acquired with interrupts disabled (under splclock()) */
+#ifdef __DARLING__
+void dtape_timer_queue_changed_locked(mpqueue_head_t* queue);
+#endif
+
 #define timer_queue_lock_spin(queue)                                    \
 	lck_mtx_lock_spin_always(&queue->lock_data)
 
@@ -494,6 +498,10 @@ timer_call_enqueue_deadline_unlocked(
 	call->tc_ttd = ttd;
 
 	timer_call_entry_enqueue_deadline(call, queue, deadline);
+#ifdef __DARLING__
+	// arm for the new head while the queue is locked; see dtape_timer_queue_changed_locked()
+	dtape_timer_queue_changed_locked(queue);
+#endif
 	timer_queue_unlock(queue);
 	simple_unlock(&call->tc_lock);
 

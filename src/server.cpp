@@ -202,6 +202,10 @@ struct DTapeHooks {
 
 	static int dtape_hook_thread_send_signal(void* thread_context, int signal) {
 		try {
+			// a dead thread can't take the signal; sendSignal() would drop it silently
+			if (static_cast<DarlingServer::Thread*>(thread_context)->isDead()) {
+				return -ESRCH;
+			}
 			static_cast<DarlingServer::Thread*>(thread_context)->sendSignal(signal);
 			return 0;
 		} catch (std::system_error e) {
@@ -287,6 +291,8 @@ struct DTapeHooks {
 			memory_region_info->map_offset = info.mapOffset;
 			protection = info.protection;
 			memory_region_info->shared = info.shared;
+			memory_region_info->inode = info.inode;
+			memory_region_info->anon_shared = info.anonShared; // x86Code
 		} catch (...) {
 			return false;
 		}
@@ -538,9 +544,18 @@ void DarlingServer::Server::start() {
 
 			while (auto msg = _inbox.pop()) {
 				// TODO: this could be done concurrently
-				auto call = DarlingServer::Call::callFromMessage(std::move(*msg));
+				// x86Code: a message darlingserver can't take (a client's protocol error: unknown call number, PID
+				// mismatch, ...) costs that message, not every process (willi/darlingserver#7 does this per error class)
+				std::shared_ptr<DarlingServer::Call> call;
+				try {
+					call = DarlingServer::Call::callFromMessage(std::move(*msg));
+				} catch (const std::exception& e) {
+					static DarlingServer::Log serverLog("server");
+					serverLog.error() << "Dropped a message darlingserver could not take: " << e.what() << serverLog.endLog;
+					continue;
+				}
 				if (call) {
-					_workQueue.push(call->thread());
+					scheduleThread(call->thread()); // x86Code: once at most (willi/darlingserver#13)
 				}
 			}
 		}
@@ -603,6 +618,10 @@ void DarlingServer::Server::start() {
 					// spurious expiration?
 					continue;
 				}
+
+				// the timerfd is disarmed now, so forget its deadline: otherwise, until dtape_timer_fired() re-arms it, every
+				// arm for a later deadline is skipped, and a timer callout that waits (e.g. for a lock) delays them all
+				_currentTimerDeadline = 0;
 
 				// we're done handling the timerfd;
 				// we don't need to lock anymore (and the following call might need to arm the timer again)
@@ -684,7 +703,16 @@ void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
 	thread->doWork();
 };
 
+// x86Code (willi/darlingserver#13): a thread is on the work queue once at most, as XNU's thread_setrun() puts a thread
+// on one run queue only. A second entry ran doWork() once too often, and one that found the thread suspended in a wait
+// resumed it with no wakeup: an S2C caller's reply wait then returned "interrupted", and the reply that came later was
+// the next call's "duplicate S2C reply".
 void DarlingServer::Server::scheduleThread(std::shared_ptr<Thread> thread) {
+	if (!thread->claimScheduling()) {
+		static DarlingServer::Log scheduleLog("schedule");
+		scheduleLog.warning() << *thread << ": already on the work queue; dropped another entry for it" << scheduleLog.endLog;
+		return;
+	}
 	_workQueue.push(thread);
 };
 

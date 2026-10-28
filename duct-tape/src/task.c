@@ -116,6 +116,12 @@ dtape_task_t* dtape_task_create(dtape_task_t* parent_task, uint32_t nsid, void* 
 	}
 
 	task->xnu_task.audit_token.val[5] = task->saved_pid;
+	// x86Code: like XNU's p_idversion, a non-zero number unique to this process instance
+	// (libxpc checks it when fetching its own audit token)
+	{
+		static uint32_t next_idversion = 0;
+		task->xnu_task.audit_token.val[7] = __atomic_add_fetch(&next_idversion, 1, __ATOMIC_RELAXED);
+	}
 
 	if (architecture == dserver_rpc_architecture_x86_64 || architecture == dserver_rpc_architecture_arm64) {
 		task_set_64Bit_addr(&task->xnu_task);
@@ -192,7 +198,16 @@ void dtape_task_release(dtape_task_t* task) {
 };
 
 void dtape_task_dying(dtape_task_t* task) {
-	// nothing for now
+	// x86Code: (from willi/darlingserver#3) as XNU's task_terminate_internal() does when a process exits, its port
+	// rights die with it, not with the last reference to the task. A process whose main thread exited first (an XPC
+	// service in xpc_main()/dispatch_main()) leaks a task reference, so its rights lived on: a client waiting for a
+	// reply from it (datamigrator from migrationpluginwrapper) never got the send-once notification and hung.
+	task_lock(&task->xnu_task);
+	task->xnu_task.active = false;
+	ipc_task_disable(&task->xnu_task);
+	task_unlock(&task->xnu_task);
+
+	ipc_space_terminate(task->xnu_task.itk_space);
 };
 
 void dtape_task_set_dyld_info(dtape_task_t* task, uint64_t address, uint64_t length) {
@@ -218,6 +233,12 @@ bool dtape_task_try_resume(dtape_task_t* task) {
 };
 
 void task_deallocate(task_t xtask) {
+	// x86Code: as XNU's task_deallocate(), a null task is a no-op. MIG server stubs release what convert_port_to_task()
+	// gave them, and that is TASK_NULL for a null port: mach_memory_entry_ownership(entry, TASK_NULL, ...) (WebKit's
+	// GPU process giving up ownership of shared memory) crashed darlingserver here, and every process with it.
+	if (xtask == TASK_NULL) {
+		return;
+	}
 	dtape_task_t* task = dtape_task_for_xnu_task(xtask);
 	os_ref_count_t count = os_ref_release(&xtask->ref_count);
 	if (count > 0) {

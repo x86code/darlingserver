@@ -517,6 +517,14 @@ filt_machport_turnstile_prepare_lazily(
 	mach_msg_type_name_t msgt_name,
 	ipc_port_t port)
 {
+#ifdef __DARLING__
+	/*
+	 * x86Code: Darling's kqchan knotes are not in a kqueue (so not suppressed/locked)
+	 * and have no turnstile; this only sets up priority inheritance for a port
+	 * received with the event (e.g. a receive right in an XPC check-in). Skip it.
+	 */
+	return;
+#endif
 	/* This is called from within filt_machportprocess */
 	assert((kn->kn_status & KN_SUPPRESSED) && (kn->kn_status & KN_LOCKED));
 
@@ -1138,6 +1146,22 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	}
 
 	imq_lock(mqueue);
+
+#ifdef __DARLING__
+	/*
+	 * x86Code: receiving a complex message here (out-of-line memory, port rights) makes
+	 * the copyout map memory in the receiver through an S2C call from a kqchan
+	 * microthread, which can deadlock darlingserver. Report MACH_RCV_TOO_LARGE instead
+	 * (the message stays queued, its size and the port name go in the event) and let
+	 * the receiver call mach_msg() itself, as XNU clients do for oversized messages.
+	 */
+	if ((option & MACH_RCV_MSG) && (option & MACH_RCV_LARGE) && io_otype(object) == IOT_PORT) {
+		ipc_kmsg_t first = ipc_kmsg_queue_first(&mqueue->imq_messages);
+		if (first != IKM_NULL && (first->ikm_header->msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+			size = 0;
+		}
+	}
+#endif
 
 	/* just use the reference from here on out */
 	io_reference(object);

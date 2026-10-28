@@ -197,6 +197,9 @@ calls = [
 
 	('stop_after_exec', [], []),
 
+	# x86Code: the next exec completes a posix_spawn (fork + exec); it must not be reported as NOTE_EXEC
+	('spawn_exec', [], []),
+
 	('set_tracer', [
 		('target', 'int32_t'),
 		('tracer', 'int32_t'),
@@ -291,6 +294,19 @@ calls = [
 
 	('task_self_trap', [], [
 		('port_name', 'uint32_t'),
+	]),
+
+	# x86Code: fileports
+	('fileport_makeport', [
+		('fd', '@fd'),
+	], [
+		('port_name', 'uint32_t'),
+	]),
+
+	('fileport_makefd', [
+		('port_name', 'uint32_t'),
+	], [
+		('fd', '@fd'),
 	]),
 
 	('host_self_trap', [], [
@@ -417,6 +433,25 @@ calls = [
 		('name', 'uint32_t'),
 		('ptype', 'uint32_t*', 'uint64_t'),
 	], [], XNU_TRAP_CALL | XNU_TRAP_NOSUFFIX_ARGS),
+
+	# x86Code: iokitd publishes its main port as the host IO master port
+	('set_io_master_port', [
+		('name', 'uint32_t'),
+	], [], XNU_TRAP_CALL | XNU_TRAP_NOPREFIX | XNU_TRAP_NOSUFFIX),
+
+	# x86Code: posix_spawn special-port actions, applied like XNU's exec_handle_port_actions
+	('spawn_set_special_port', [
+		('which', 'int32_t'),
+		('name', 'uint32_t'),
+	], [], XNU_TRAP_CALL | XNU_TRAP_NOPREFIX | XNU_TRAP_NOSUFFIX),
+
+	# x86Code: needed by libdispatch (task voucher) in iOS simulator processes
+	('host_create_mach_voucher', [
+		('host', 'uint32_t'),
+		('recipes', 'void*', 'uint64_t'),
+		('recipes_size', 'int32_t'),
+		('voucher', 'uint32_t*', 'uint64_t'),
+	], [], XNU_TRAP_CALL | XNU_TRAP_NOPREFIX | XNU_TRAP_NOSUFFIX_ARGS),
 
 	('task_for_pid', [
 		('target_tport', 'uint32_t'),
@@ -643,6 +678,20 @@ calls = [
 		('message_count', 'uint64_t'),
 		('fd', '@fd'),
 	], UNMANAGED_CALL),
+
+	# x86Code: appended last so that the numbers of all other calls stay the same (mldr, the darling launcher
+	# and other already-built clients keep working).
+	# The memfd behind a range of the caller's memory (made shared first if it isn't), for handing
+	# pages to a native Linux process without copying (spike3/metal: mtlvk imports MTLBuffer memory).
+	# `shared` is 0 when the fd only holds a snapshot (a file mapping, which is never replaced by a memfd).
+	('x86code_memfd_for_region', [
+		('address', 'uint64_t'),
+		('size', 'uint64_t'),
+	], [
+		('fd', '@fd'),
+		('offset', 'uint64_t'),
+		('shared', 'uint32_t'),
+	]),
 ]
 
 ALLOWED_PRIVATE_TYPES = [

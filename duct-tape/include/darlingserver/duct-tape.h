@@ -25,6 +25,11 @@ uint32_t dtape_task_self_trap(void);
 uint32_t dtape_host_self_trap(void);
 uint32_t dtape_thread_self_trap(void);
 uint32_t dtape_mach_reply_port(void);
+// x86Code: fileports; return 0 or a negative Linux errno
+int dtape_fileport_makeport(int fd, uint32_t* out_name);
+int dtape_fileport_makefd(uint32_t name, int* out_fd);
+// x86Code: the memfd behind [address, address + size) of the current task (see memory.c)
+int dtape_memfd_for_region(uint64_t address, uint64_t size, int* out_fd, uint64_t* out_offset, uint32_t* out_shared);
 uint32_t dtape_thread_get_special_reply_port(void);
 uint32_t dtape_mk_timer_create(void);
 
@@ -104,6 +109,12 @@ bool dtape_kqchan_mach_port_has_events(dtape_kqchan_mach_port_t* kqchan);
 void dtape_semaphore_up(dtape_semaphore_t* semaphore);
 dtape_semaphore_wait_result_t dtape_semaphore_down(dtape_semaphore_t* semaphore);
 bool dtape_semaphore_down_simple(dtape_semaphore_t* semaphore);
+/**
+ * x86Code (willi/darlingserver#6): keeps a semaphore usable by a waiter that got it from somewhere it may be destroyed
+ * meanwhile: a wait on a destroyed semaphore then fails instead of reading freed memory. Each retain needs a release.
+ */
+void dtape_semaphore_retain(dtape_semaphore_t* semaphore);
+void dtape_semaphore_release(dtape_semaphore_t* semaphore);
 
 uint64_t dtape_debug_task_port_count(dtape_task_t* task);
 uint64_t dtape_debug_task_list_ports(dtape_task_t* task, dtape_debug_task_list_ports_iterator_f iterator, void* context);

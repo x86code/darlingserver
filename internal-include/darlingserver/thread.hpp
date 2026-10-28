@@ -21,6 +21,7 @@
 #define _DARLINGSERVER_THREAD_HPP_
 
 #include <memory>
+#include <atomic>
 #include <sys/types.h>
 #include <mutex>
 #include <shared_mutex>
@@ -41,11 +42,13 @@ struct DTapeHooks;
 namespace DarlingServer {
 	class Process;
 	class Call;
+	class Server;
 
 	class Thread: public std::enable_shared_from_this<Thread>, public Loggable {
 		friend class Process;
 		friend class Call; // HACK, see call.cpp
 		friend class Registry<Thread>;
+		friend class Server; // x86Code: claimScheduling() (willi/darlingserver#13)
 
 	public:
 		enum class RunState {
@@ -85,6 +88,10 @@ namespace DarlingServer {
 		dtape_thread_t* _dtapeThread;
 		std::function<void()> _continuationCallback = nullptr;
 		bool _running = false;
+		// x86Code (willi/darlingserver#13): on the work queue, its doWork() not yet started (Server::scheduleThread())
+		std::atomic<bool> _scheduled{false};
+		// Server::scheduleThread() only: whether the thread wasn't on the work queue already (and now is)
+		bool claimScheduling();
 		bool _terminating = false;
 		std::shared_ptr<Call> _activeCall = nullptr;
 		std::shared_ptr<Thread> _impersonating = nullptr;
@@ -103,6 +110,14 @@ namespace DarlingServer {
 		bool _handlingInterruptedCall = false;
 		dtape_semaphore_t* _s2cInterruptEnterSemaphore = nullptr;
 		dtape_semaphore_t* _s2cInterruptExitSemaphore = nullptr;
+		// x86Code (willi/darlingserver#14): the S2C call waiting for this thread's green light (signal path), 0 for none:
+		// S2CPerform takes it, a caller that stops waiting withdraws it, and exec voids it. A stale signal finds none.
+		uint64_t _s2cRequest = 0;
+		// the last request S2CPerform took
+		uint64_t _s2cTaken = 0;
+		// x86Code: S2C calls whose caller stopped waiting after the call was sent: their late replies are dropped
+		// instead of being taken as the next call's (the "already had one pending" duplicate)
+		uint32_t _s2cAbandonedReplies = 0;
 		bool _deferReplyForS2C = false;
 		std::optional<Message> _deferredReply = std::nullopt;
 
@@ -116,6 +131,7 @@ namespace DarlingServer {
 		std::queue<std::shared_ptr<Call>> _pendingInterrupts;
 		std::optional<Message> _pendingSavedReply = std::nullopt;
 		bool _dead = false;
+		bool _releaseScheduled = false; // x86Code (willi/darlingserver#10)
 		std::shared_ptr<Thread> _selfReference = nullptr;
 
 		static void microthreadWorker();
@@ -167,7 +183,8 @@ namespace DarlingServer {
 		std::shared_ptr<Process> process() const;
 
 		std::shared_ptr<Call> pendingCall() const;
-		void setPendingCall(std::shared_ptr<Call> newPendingCall);
+		// x86Code (willi #13): false when the call waits behind the pending one (an InterruptEnter)
+		bool setPendingCall(std::shared_ptr<Call> newPendingCall);
 
 		std::shared_ptr<Call> activeCall() const;
 		void makePendingCallActive();
@@ -265,6 +282,12 @@ namespace DarlingServer {
 		 */
 		void notifyDead();
 		bool isDead() const;
+
+		/**
+		 * x86Code (willi/darlingserver#10): informs this Thread instance that its process has died: one that died before
+		 * it is released now, if its microthread is done with it (a main thread that checked out stays until then).
+		 */
+		void notifyProcessDead();
 
 		/**
 		 * @note Only to be used by direct XNU traps! (e.g. Mach IPC, psynch, etc.)

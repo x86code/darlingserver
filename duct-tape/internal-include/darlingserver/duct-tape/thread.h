@@ -38,7 +38,13 @@ struct dtape_thread {
 	bool processing_signal;
 
 	bool waiting_suspended;
+	// x86Code (willi/darlingserver#10): set by dtape_thread_dying(), under the task lock: off its task's thread list
+	bool off_task_list;
 	dtape_mutex_t suspension_mutex;
+
+	// held from thread_block() deciding to suspend until the thread has suspended, and by thread_unblock() around its
+	// resume, so a wakeup in between isn't lost (see thread_block_parameter())
+	libsimple_lock_t wake_lock;
 	dtape_condvar_t suspension_condvar;
 
 	//
