@@ -14,6 +14,11 @@ typedef struct dtape_map_shared_descriptor {
 	os_refcnt_t refcount;
 	int memfd;
 	uint64_t size;
+	// x86Code: the memfd's inode, and a link in the list of all descriptors (to find the descriptor of a
+	// process's existing MAP_SHARED mapping by the inode in /proc/<pid>/maps)
+	uint64_t inode;
+	struct dtape_map_shared_descriptor* all_next;
+	struct dtape_map_shared_descriptor** all_prev;
 } dtape_map_shared_descriptor_t;
 
 typedef struct dtape_map_shared_entry {
