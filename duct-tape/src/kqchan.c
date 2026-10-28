@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <ipc/ipc_mqueue.h>
 #include <kern/thread.h>
+extern int backtrace(void** buffer, int size); // x86Code: glibc (execinfo.h clashes with XNU headers)
 
 extern int filt_machportattach(struct knote *kn, struct kevent_qos_s *kev);
 extern void filt_machportdetach(struct knote *kn);
@@ -70,9 +71,19 @@ void dtape_kqchan_mach_port_modify(dtape_kqchan_mach_port_t* kqchan, uint64_t re
 	filt_machporttouch(&kqchan->knote, &kev);
 };
 
+// Notifiers load the callback once and skip a NULL one; the context stays, so a notifier that loaded the callback just
+// before this still has a context to pass it. That context must outlive such a notifier: the server's is a weak
+// reference, freed only after dtape_kqchan_mach_port_destroy().
+static void kqchan_notify(dtape_kqchan_mach_port_t* kqchan) {
+	dtape_kqchan_mach_port_notification_callback_f callback = __atomic_load_n(&kqchan->callback, __ATOMIC_ACQUIRE);
+
+	if (callback) {
+		callback(kqchan->context);
+	}
+};
+
 void dtape_kqchan_mach_port_disable_notifications(dtape_kqchan_mach_port_t* kqchan) {
-	kqchan->callback = NULL;
-	kqchan->context = NULL;
+	__atomic_store_n(&kqchan->callback, NULL, __ATOMIC_RELEASE);
 };
 
 bool dtape_kqchan_mach_port_fill(dtape_kqchan_mach_port_t* kqchan, dserver_kqchan_reply_mach_port_read_t* reply, uint64_t default_buffer, uint64_t default_buffer_size) {
@@ -136,21 +147,9 @@ kevent_ctx_t kevent_get_context(thread_t xthread) {
 static void knote_post(struct knote* kn, long hint) {
 	dtape_kqchan_mach_port_t* kqchan = __container_of(kn, dtape_kqchan_mach_port_t, knote);
 
-	dtape_log_debug("%s: kn=%p, kqchan=%p, kqchan->callback=%p", __FUNCTION__, kn, kqchan, kqchan->callback);
-
-	if (!kqchan->callback) {
-		return;
-	}
-
-#if 0
-	if (!dtape_kqchan_mach_port_has_events(kqchan)) {
-		return;
-	}
-#endif
-
 	dtape_log_debug("%s: kn=%p, kqchan=%p; invoking callback...", __FUNCTION__, kn, kqchan);
 
-	kqchan->callback(kqchan->context);
+	kqchan_notify(kqchan);
 };
 
 void knote(struct klist* list, long hint) {
@@ -169,6 +168,14 @@ void knote_vanish(struct klist* list, bool make_active) {
 
 	SLIST_FOREACH_SAFE(kn, list, kn_selnext, tmp) {
 		dtape_log_debug("knote %p is vanishing", kn);
+		// x86Code: diagnostics for unexpected EV_VANISHED (who destroyed/moved the receive right)
+		{
+			dtape_kqchan_mach_port_t* kq = __container_of(kn, dtape_kqchan_mach_port_t, knote);
+			void* bt[16];
+			int n = backtrace(bt, 16);
+			dtape_log_debug("x86Code: kqchan %p (task pid %u, port 0x%x) vanishing, make_active=%d, self %p bt %p %p %p %p %p %p %p %p", kq, kq->task ? kq->task->saved_pid : 0, (unsigned)kn->kn_id, make_active, (void*)knote_vanish,
+				n > 1 ? bt[1] : 0, n > 2 ? bt[2] : 0, n > 3 ? bt[3] : 0, n > 4 ? bt[4] : 0, n > 5 ? bt[5] : 0, n > 6 ? bt[6] : 0, n > 7 ? bt[7] : 0, n > 8 ? bt[8] : 0);
+		}
 		// TODO: handle the old style of vanishing (i.e. `EV_EOF | EV_ONESHOT`)
 		kn->kn_status |= KN_VANISHED;
 		knote_post(kn, 0);
@@ -193,7 +200,7 @@ static void kqchan_waitq_waiter_entry(void* context, wait_result_t wait_result) 
 			break;
 		} else {
 			if (filt_machportpeek(&kqchan->knote) & FILTER_ACTIVE) {
-				kqchan->callback(kqchan->context);
+				kqchan_notify(kqchan);
 			}
 			// wait until it's read
 			if (!dtape_semaphore_down_simple(kqchan->waiter_read_semaphore)) {

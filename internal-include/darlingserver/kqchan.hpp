@@ -68,6 +68,19 @@ namespace DarlingServer {
 	};
 
 
+	/**
+	 * A Mach port knote of a process's kqueue, served over a socket pair with libkqueue's machport filter
+	 * (src/external/libkqueue/src/linux/machport.c), which must match it.
+	 *
+	 * - notification: sent (at most one outstanding) when the port has a message; the peer's epoll sees the socket
+	 *   readable. A read or a modify lets the next one be sent.
+	 * - read: the peer reads the notification, then sends a read request and gets the event as the reply. By the time
+	 *   it reads, another thread of the peer may have consumed the notification; it then drops the event rather than
+	 *   wait, and the next notification brings it.
+	 * - modify: the peer sends the new receive buffer and flags and waits for the reply. A notification sent before
+	 *   the request arrives ahead of the reply, and the peer skips it; so with the reply we check for events again and
+	 *   send a new notification after the reply (`_deferNotification`) if the port still has a message.
+	 */
 	class Kqchan::MachPort: public Kqchan, public std::enable_shared_from_this<MachPort> {
 	private:
 		uint32_t _port;
@@ -75,6 +88,9 @@ namespace DarlingServer {
 		uint64_t _receiveBufferSize;
 		uint64_t _savedFilterFlags;
 		dtape_kqchan_mach_port_t* _dtapeKqchan = nullptr;
+		// the duct-taped kqchan's notification context: a notifier can still be running when we're destroyed, so it
+		// gets a weak reference to us, freed once the duct-taped kqchan is gone
+		std::weak_ptr<MachPort>* _notifyContext = nullptr;
 
 		void _modify(uint64_t receiveBuffer, uint64_t receiveBufferSize, uint64_t savedFilterFlags, pid_t nstid);
 		void _read(uint64_t defaultBuffer, uint64_t defaultBufferSize, pid_t nstid);
