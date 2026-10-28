@@ -805,6 +805,18 @@ void DarlingServer::Call::TaskIs64Bit::processCall() {
 	if (auto maybeTargetProcess = processRegistry().lookupEntryByNSID(_body.id)) {
 		auto targetProcess = *maybeTargetProcess;
 		is64Bit = targetProcess->is64Bit();
+		// x86Code: some processes (simulator apps started suspended for a debugger, after an earlier one in the
+		// container) are registered with Architecture::Invalid; debugserver then took them for i386 and crashed.
+		// There is no 32-bit loader (mldr32) in this build, so an unknown architecture is the host's.
+		if (!is64Bit) {
+			callLog.error() << "TaskIs64Bit: process " << _body.id << " architecture " << static_cast<int>(targetProcess->architecture()) << " (x86Code diagnostic)" << callLog.endLog;
+		}
+		if (targetProcess->architecture() == Process::Architecture::Invalid) {
+			callLog.warning() << "TaskIs64Bit: process " << _body.id << " has no architecture; answering the host's" << callLog.endLog;
+#if __x86_64__ || __aarch64__
+			is64Bit = true;
+#endif
+		}
 	} else {
 		code = -ESRCH;
 	}

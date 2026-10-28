@@ -1071,11 +1071,26 @@ kern_return_t mach_vm_page_info(vm_map_t map, mach_vm_address_t address, vm_page
 };
 
 kern_return_t mach_vm_page_query(vm_map_t map, mach_vm_offset_t offset, int* disposition, int* ref_count) {
-	dtape_stub_unsafe();
+	// x86Code: as mach_vm_page_range_query: resident (debuggers ask; the unsafe stub aborted darlingserver)
+	*disposition = 0x1; // VM_PAGE_QUERY_PAGE_PRESENT
+	*ref_count = 1;
+	return KERN_SUCCESS;
 };
 
+// x86Code: debugserver (LLDB's qMemoryRegionInfo dirty-pages) calls this for every region; the unsafe stub aborted
+// darlingserver and with it the whole container. Linux doesn't tell us per-page residency of another process cheaply,
+// so every page is reported present (VM_PAGE_QUERY_PAGE_PRESENT), which is what a resident, non-purgeable mapping is.
 kern_return_t mach_vm_page_range_query(vm_map_t map, mach_vm_offset_t address, mach_vm_size_t size, mach_vm_address_t dispositions_addr, mach_vm_size_t* dispositions_count) {
-	dtape_stub_unsafe();
+	if (!dispositions_count) return KERN_INVALID_ARGUMENT;
+	mach_vm_size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+	if (pages > *dispositions_count) pages = *dispositions_count;
+	int present = 0x1; // VM_PAGE_QUERY_PAGE_PRESENT
+	for (mach_vm_size_t i = 0; i < pages; i++) {
+		if ((copyout)(&present, dispositions_addr + i * sizeof(int), sizeof(int)) != 0)
+			return KERN_INVALID_ADDRESS;
+	}
+	*dispositions_count = pages;
+	return KERN_SUCCESS;
 };
 
 kern_return_t mach_vm_protect(vm_map_t map, mach_vm_offset_t start, mach_vm_size_t size, boolean_t set_maximum, vm_prot_t new_protection) {
