@@ -24,6 +24,7 @@
 #include <string>
 #include <sstream>
 #include <memory>
+#include <optional> // x86Code
 
 namespace DarlingServer {
 	class Thread;
@@ -42,6 +43,8 @@ namespace DarlingServer {
 		};
 
 		void _log(Type type, std::string message) const;
+		// x86Code: whether a message of this type would be written (a disabled Stream formats nothing)
+		bool _wants(Type type) const;
 		static std::string _typeToString(Type type);
 
 	public:
@@ -74,7 +77,9 @@ namespace DarlingServer {
 	private:
 		Type _type;
 		const Log& _log;
-		std::ostringstream _buffer;
+		// x86Code: made only for a type the log writes; debug()/info() streams on hot paths (every call, every
+		// Mach message) built and threw away a formatted string each time (~8% of darlingserver while scrolling)
+		std::optional<std::ostringstream> _buffer;
 
 		Stream(Type type, const Log& log);
 
@@ -91,7 +96,9 @@ namespace DarlingServer {
 
 		template<class T>
 		std::enable_if_t<!std::is_base_of_v<Loggable, T>, Stream&> operator<<(const T& value) {
-			_buffer << value;
+			if (_buffer) {
+				*_buffer << value;
+			}
 			return *this;
 		};
 	};

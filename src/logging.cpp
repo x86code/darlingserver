@@ -46,23 +46,33 @@ DarlingServer::Log::Log(std::string category):
 DarlingServer::Log::Stream::Stream(Type type, const Log& log):
 	_type(type),
 	_log(log)
-	{};
+{
+	if (log._wants(type)) {
+		_buffer.emplace();
+	}
+};
 
 DarlingServer::Log::Stream::~Stream() {
 	*this << endLog;
 };
 
 DarlingServer::Log::Stream& DarlingServer::Log::Stream::operator<<(EndLog value) {
-	auto str = _buffer.str();
+	if (!_buffer) {
+		return *this;
+	}
+	auto str = _buffer->str();
 	if (!str.empty()) {
 		_log._log(_type, str);
-		_buffer.str(std::string());
-		_buffer.clear();
+		_buffer->str(std::string());
+		_buffer->clear();
 	}
 	return *this;
 };
 
 DarlingServer::Log::Stream& DarlingServer::Log::Stream::operator<<(const Loggable& loggable) {
+	if (!_buffer) {
+		return *this;
+	}
 	loggable.logToStream(*this);
 	return *this;
 };
@@ -98,20 +108,18 @@ std::string DarlingServer::Log::_typeToString(Type type) {
 	}
 };
 
-void DarlingServer::Log::_log(Type type, std::string message) const {
-	// NOTE: we use POSIX file APIs because we want to append each message to the log file atomically,
-	//       and as far as i can tell, C++ fstreams provide no such guarantee (that they won't write in chunks).
+// x86Code: the level/category filter of _log, also asked when a Stream is made
+static int dserverLogFile() {
 	static int logFile = []() {
-		std::filesystem::path path(Server::sharedInstance().prefix() + "/private/var/log/dserver.log");
+		std::filesystem::path path(DarlingServer::Server::sharedInstance().prefix() + "/private/var/log/dserver.log");
 		std::filesystem::create_directories(path.parent_path());
 		return open(path.c_str(), O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 	}();
 
-	static bool logToStderr = []() {
-		auto val = getenv("DSERVER_LOG_STDERR");
-		return val && strlen(val) >= 1 && (val[0] == 't' || val[0] == 'T' || val[0] == '1');
-	}();
+	return logFile;
+}
 
+bool DarlingServer::Log::_wants(Type type) const {
 	static Type logMinLevel = []() {
 		auto val = getenv("DSERVER_LOG_LEVEL");
 		Type level = DEFAULT_LOG_CUTOFF;
@@ -135,9 +143,21 @@ void DarlingServer::Log::_log(Type type, std::string message) const {
 		return val ? std::string(",") + val + "," : std::string();
 	}();
 
-	bool debugCategory = !debugCategories.empty() && debugCategories.find("," + _category + ",") != std::string::npos;
+	bool wanted = type >= logMinLevel || _alwaysLog ||
+		(!debugCategories.empty() && debugCategories.find("," + _category + ",") != std::string::npos);
+	return wanted && dserverLogFile() >= 0;
+};
 
-	if ((type < logMinLevel && !_alwaysLog && !debugCategory) || logFile < 0) {
+void DarlingServer::Log::_log(Type type, std::string message) const {
+	// NOTE: we use POSIX file APIs because we want to append each message to the log file atomically,
+	//       and as far as i can tell, C++ fstreams provide no such guarantee (that they won't write in chunks).
+	int logFile = dserverLogFile();
+	static bool logToStderr = []() {
+		auto val = getenv("DSERVER_LOG_STDERR");
+		return val && strlen(val) >= 1 && (val[0] == 't' || val[0] == 'T' || val[0] == '1');
+	}();
+
+	if (!_wants(type)) {
 		return;
 	}
 
