@@ -31,6 +31,8 @@
 
 #include <sys/mman.h>
 #include <fcntl.h> // x86Code
+#include <sys/ioctl.h>
+#include <linux/fs.h> // x86Code: PROCMAP_QUERY
 #include <string_view> // x86Code
 #include <cstring> // x86Code
 
@@ -537,6 +539,44 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
 	if (fd < 0) {
 		processLog.warning() << *this << ": can't open \"" << path << "\"" << processLog.endLog;
 		throw std::system_error(EFAULT, std::generic_category());
+	}
+
+	// x86Code: ask the kernel for the one VMA (PROCMAP_QUERY, Linux 6.11+) instead of reading and parsing the
+	// whole maps file (a 256 KB buffer and thousands of lines per call; 5-9% of darlingserver while scrolling,
+	// called for every out-of-line memory and memory entry); older kernels fall through to the parser
+	{
+		static bool noQuery = false;
+		if (!noQuery) {
+			char name[4096];
+			struct procmap_query q;
+			memset(&q, 0, sizeof(q));
+			q.size = sizeof(q);
+			q.query_addr = address;
+			q.query_flags = 0; // the VMA covering the address
+			q.vma_name_addr = (uintptr_t)name;
+			q.vma_name_size = sizeof(name);
+			if (ioctl(fd, PROCMAP_QUERY, &q) == 0) {
+				close(fd);
+				info.startAddress = q.vma_start;
+				info.pageCount = (q.vma_end - q.vma_start) / sysconf(_SC_PAGESIZE);
+				info.mapOffset = q.vma_offset;
+				info.protection = 0;
+				if (q.vma_flags & PROCMAP_QUERY_VMA_READABLE) info.protection |= PROT_READ;
+				if (q.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) info.protection |= PROT_WRITE;
+				if (q.vma_flags & PROCMAP_QUERY_VMA_EXECUTABLE) info.protection |= PROT_EXEC;
+				info.shared = (q.vma_flags & PROCMAP_QUERY_VMA_SHARED) != 0;
+				info.inode = q.inode;
+				info.anonShared = info.shared && q.vma_name_size > 0 && strncmp(name, "/dev/zero", 9) == 0;
+				return info;
+			}
+			if (errno == ENOTTY || errno == EINVAL) {
+				noQuery = true;
+			} else if (errno == ENOENT) {
+				close(fd);
+				processLog.warning() << *this << ": Address 0x" << std::hex << address << " not found in \"/proc/" << std::dec << _pid << "/maps\"" << processLog.endLog;
+				throw std::system_error(EFAULT, std::generic_category());
+			}
+		}
 	}
 
 	// read in chunks; a line split across two reads is carried over
