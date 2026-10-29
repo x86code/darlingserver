@@ -43,6 +43,9 @@ namespace DarlingServer {
 		size_t _threadsAvailable = 0;
 		std::condition_variable _cv;
 		bool _dying = false;
+		// x86Code: inline mode (no worker threads): the owner (darlingserver's epoll thread) runs the items itself with
+		// drain(). With one worker, every RPC cost the epoll thread a futex wake of the worker and a context switch.
+		bool _inline = false;
 
 		static constexpr unsigned int minimumThreads() {
 			return (Config::singleThreadedWorkQueue) ? 1 : 2;
@@ -129,10 +132,14 @@ namespace DarlingServer {
 		};
 
 	public:
-		WorkQueue(std::function<void(WorkItem)> workerFunction):
-			_workerFunction(workerFunction)
+		WorkQueue(std::function<void(WorkItem)> workerFunction, bool runInline = false):
+			_workerFunction(workerFunction),
+			_inline(runInline)
 		{
 			std::scoped_lock lock(_queueMutex);
+			if (_inline) {
+				return;
+			}
 
 			// start the permanent worker threads
 			for (size_t i = 0; i < minimumThreads(); ++i) {
@@ -158,9 +165,32 @@ namespace DarlingServer {
 		WorkQueue(WorkQueue&&) = delete;
 		WorkQueue& operator=(WorkQueue&&) = delete;
 
+		bool isInline() const {
+			return _inline;
+		};
+
+		// x86Code: inline mode: run queued items (and the ones they queue) until none is left; returns how many ran.
+		size_t drain() {
+			size_t ran = 0;
+			while (true) {
+				std::unique_lock lock(_queueMutex);
+				if (_workItems.empty()) {
+					return ran;
+				}
+				WorkItem item = std::move(_workItems.front());
+				_workItems.pop();
+				lock.unlock();
+				_workerFunction(std::move(item));
+				++ran;
+			}
+		};
+
 		void push(WorkItem workItem) {
 			std::unique_lock lock(_queueMutex);
 			_workItems.push(std::move(workItem));
+			if (_inline) {
+				return;
+			}
 
 			// if there are no threads available to perform the work AND we have less than the
 			// maximum number of worker threads currently active, spawn a temporary worker thread.

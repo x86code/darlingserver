@@ -48,6 +48,9 @@ namespace DarlingServer {
 		bool _canWrite = true;
 		bool _listenerWriteInterest = false;
 		int _wakeupFD;
+		// x86Code: what the eventfd is armed with now, and whether it fired since (the loop re-arms only then)
+		uint32_t _wakeupEvents = 0;
+		bool _wakeupFired = true;
 		int _timerFD;
 		uint64_t _currentTimerDeadline = 0;
 		std::mutex _timerLock;
@@ -79,6 +82,10 @@ namespace DarlingServer {
 		static Server& sharedInstance();
 
 		void scheduleThread(std::shared_ptr<Thread> thread);
+
+		// x86Code: the epoll thread runs the microthreads itself (DSERVER_INLINE, default on with one worker)
+		bool inlineWork() const { return _workQueue.isInline(); };
+		size_t drainWork() { return _workQueue.drain(); };
 
 		void addMonitor(std::shared_ptr<Monitor> monitor);
 		void removeMonitor(std::shared_ptr<Monitor> monitor);

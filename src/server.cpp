@@ -447,7 +447,9 @@ struct DTapeHooks {
 DarlingServer::Server::Server(std::string prefix):
 	_prefix(prefix),
 	_socketPath(_prefix + "/.darlingserver.sock"),
-	_workQueue(std::bind(&Server::_worker, this, std::placeholders::_1))
+	_workQueue(std::bind(&Server::_worker, this, std::placeholders::_1),
+		// x86Code: DSERVER_INLINE=0 brings back the worker thread
+		Config::singleThreadedWorkQueue && !(getenv("DSERVER_INLINE") && strcmp(getenv("DSERVER_INLINE"), "0") == 0))
 {
 	sharedInstancePointer = this;
 
@@ -562,9 +564,11 @@ void DarlingServer::Server::start() {
 			}
 		}
 
-		// reset the eventfd by reading from it
-		eventfd_t value;
-		eventfd_read(_wakeupFD, &value);
+		// x86Code: inline mode: run the microthreads the messages (and the last wakeup's timers and monitors) made
+		// runnable, here on the epoll thread. Their replies leave from here directly (sendMessage).
+		if (_workQueue.isInline()) {
+			_workQueue.drain();
+		}
 
 		if (_canWrite) {
 			_canWrite = _outbox.sendMany(_listenerSocket);
@@ -574,12 +578,23 @@ void DarlingServer::Server::start() {
 			}
 		}
 
-		struct epoll_event settings;
-		settings.data.ptr = &_wakeupFD;
-		settings.events = (_canWrite) ? (EPOLLIN | EPOLLONESHOT) : 0;
+		// x86Code: reset and re-arm the eventfd only when it fired or what it should be armed with changed: before, every
+		// loop iteration (every RPC) made an eventfd read and an epoll_ctl even though nothing had written it
+		uint32_t wantWakeup = (_canWrite) ? (EPOLLIN | EPOLLONESHOT) : 0;
+		if (_wakeupFired || wantWakeup != _wakeupEvents) {
+			// reset the eventfd by reading from it
+			eventfd_t value;
+			eventfd_read(_wakeupFD, &value);
 
-		if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
-			throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
+			struct epoll_event settings;
+			settings.data.ptr = &_wakeupFD;
+			settings.events = wantWakeup;
+
+			if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
+				throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
+			}
+			_wakeupEvents = wantWakeup;
+			_wakeupFired = false;
 		}
 
 		struct epoll_event events[16];
@@ -606,6 +621,7 @@ void DarlingServer::Server::start() {
 					_setListenerWriteInterest(false);
 				}
 			} else if (event->data.ptr == &_wakeupFD) {
+				_wakeupFired = true;
 				// we allow the loop to go back to the top and try to send some messages
 				// (if _canWrite is true, the eventfd will be reset; otherwise, there's no point in resetting it)
 			} else if (event->data.ptr == &_timerFD) {

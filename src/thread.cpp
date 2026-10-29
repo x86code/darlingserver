@@ -914,6 +914,23 @@ void DarlingServer::Thread::kernelSync(std::function<void()> fn) {
 		condvar.notify_all();
 	});
 
+	// x86Code: with inline work (no worker thread), the epoll thread is the one that runs the kernel microthread: run the
+	// queue until it's done instead of waiting (only called outside microthreads, at startup)
+	if (Server::sharedInstance().inlineWork()) {
+		while (true) {
+			{
+				std::unique_lock lock(mutex);
+				if (done) {
+					break;
+				}
+			}
+			if (Server::sharedInstance().drainWork() == 0) {
+				std::this_thread::yield();
+			}
+		}
+		return;
+	}
+
 	{
 		std::unique_lock lock(mutex);
 		condvar.wait(lock, [&]() {
