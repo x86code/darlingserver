@@ -43,7 +43,10 @@ int ftruncate(int fd, off_t length);
 int fstat(int fd, void* buf); // x86Code: x86_64 struct stat, only st_ino is read
 
 // x86Code: all shared descriptors, to look them up by inode
-static dtape_map_shared_descriptor_t* all_descriptors;
+// x86Code: hashed by inode (see dtape_map_shared_descriptor_find_inode)
+#define DTAPE_DESC_BUCKETS 1024
+static dtape_map_shared_descriptor_t* all_descriptors[DTAPE_DESC_BUCKETS];
+#define DTAPE_DESC_BUCKET(inode) (&all_descriptors[((inode) * 0x9E3779B97F4A7C15ull) >> 54])
 static dtape_mutex_t all_descriptors_lock;
 
 #define MAP_ANONYMOUS 0x20
@@ -100,6 +103,7 @@ vm_map_t dtape_vm_map_create(struct dtape_task* task) {
 	map->dtape_task = task;
 
 	RB_INIT(&map->shared_entries);
+	map->max_entry_size = 0;
 	dtape_mutex_init(&map->shared_entry_lock);
 
 	return map;
@@ -120,12 +124,13 @@ static dtape_map_shared_descriptor_t* dtape_map_shared_descriptor_create(int mem
 	uint64_t st[18];
 	desc->inode = fstat(memfd, st) == 0 ? st[1] : 0;
 	dtape_mutex_lock(&all_descriptors_lock);
-	desc->all_next = all_descriptors;
-	desc->all_prev = &all_descriptors;
-	if (all_descriptors) {
-		all_descriptors->all_prev = &desc->all_next;
+	dtape_map_shared_descriptor_t** bucket = DTAPE_DESC_BUCKET(desc->inode);
+	desc->all_next = *bucket;
+	desc->all_prev = bucket;
+	if (*bucket) {
+		(*bucket)->all_prev = &desc->all_next;
 	}
-	all_descriptors = desc;
+	*bucket = desc;
 	dtape_mutex_unlock(&all_descriptors_lock);
 
 	return desc;
@@ -138,7 +143,7 @@ static dtape_map_shared_descriptor_t* dtape_map_shared_descriptor_find_inode(uin
 		return NULL;
 	}
 	dtape_mutex_lock(&all_descriptors_lock);
-	for (dtape_map_shared_descriptor_t* desc = all_descriptors; desc; desc = desc->all_next) {
+	for (dtape_map_shared_descriptor_t* desc = *DTAPE_DESC_BUCKET(inode); desc; desc = desc->all_next) {
 		if (desc->inode == inode && os_ref_get_count(&desc->refcount) > 0) {
 			os_ref_retain(&desc->refcount);
 			found = desc;
@@ -191,8 +196,26 @@ static void dtape_map_shared_entry_destroy(dtape_map_shared_entry_t* shared_entr
 };
 
 static void dtape_map_insert_shared_entry_locked(dtape_map_t* map, dtape_map_shared_entry_t* shared_entry) {
+	if (shared_entry->size > map->max_entry_size) {
+		map->max_entry_size = shared_entry->size;
+	}
 	RB_INSERT(dtape_map_shared_entry_head, &map->shared_entries, shared_entry);
 };
+
+// x86Code: the first entry that may overlap a range starting at `address` (no entry starting before
+// address - max_entry_size reaches it); walk on with RB_NEXT while entry->address < end
+static dtape_map_shared_entry_t* dtape_map_first_overlap_candidate(dtape_map_t* map, uint64_t address) {
+	dtape_map_shared_entry_t key;
+	key.address = address > map->max_entry_size ? address - map->max_entry_size : 0;
+	return RB_NFIND(dtape_map_shared_entry_head, &map->shared_entries, &key);
+};
+
+// x86Code: like RB_FOREACH_SAFE, over the entries that may overlap [start, start + size) only
+#define DTAPE_FOREACH_OVERLAP_SAFE(entry, tmp, map, start, size) \
+	for ((entry) = dtape_map_first_overlap_candidate((map), (start)); \
+		(entry) && (entry)->address < (start) + (size) && \
+		(((tmp) = RB_NEXT(dtape_map_shared_entry_head, &(map)->shared_entries, (entry))), 1); \
+		(entry) = (tmp))
 
 static void dtape_map_insert_shared_entry(dtape_map_t* map, dtape_map_shared_entry_t* shared_entry) {
 	dtape_mutex_lock(&map->shared_entry_lock);
@@ -208,13 +231,14 @@ static void dtape_map_insert_shared_entry(dtape_map_t* map, dtape_map_shared_ent
  */
 static size_t dtape_map_find_shared_entries_locked(dtape_map_t* map, uint64_t address, uint64_t size, dtape_map_shared_entry_t** out_entries, size_t entry_count) {
 	dtape_map_shared_entry_t* entry;
+	dtape_map_shared_entry_t* tmp;
 	size_t count = 0;
 
 	if (entry_count == 0) {
 		return count;
 	}
 
-	RB_FOREACH(entry, dtape_map_shared_entry_head, &map->shared_entries) {
+	DTAPE_FOREACH_OVERLAP_SAFE(entry, tmp, map, address, size) {
 		// x86Code: half-open ranges; an entry that merely touches the region does not intersect it
 		// (it counted, so a memory entry next to a shared region failed as "partially shared")
 		if (entry->address + entry->size <= address || entry->address >= address + size) {
@@ -822,7 +846,7 @@ static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t si
 			uint64_t byte_offset = region_info.map_offset + (start - region_info.start_address);
 			dtape_map_shared_entry_t* entry;
 			dtape_map_shared_entry_t* tmp;
-			RB_FOREACH_SAFE(entry, dtape_map_shared_entry_head, &map->shared_entries, tmp) {
+			DTAPE_FOREACH_OVERLAP_SAFE(entry, tmp, map, start, size) {
 				if (entry->address + entry->size <= start || entry->address >= start + size) {
 					continue;
 				}
@@ -847,7 +871,7 @@ static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t si
 		// snapshot below without touching the process's mapping.
 		dtape_map_shared_entry_t* entry;
 		dtape_map_shared_entry_t* tmp;
-		RB_FOREACH_SAFE(entry, dtape_map_shared_entry_head, &map->shared_entries, tmp) {
+		DTAPE_FOREACH_OVERLAP_SAFE(entry, tmp, map, start, size) {
 			if (entry->address + entry->size <= start || entry->address >= start + size) {
 				continue;
 			}
@@ -891,7 +915,7 @@ static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t si
 		// it crashed encoding the NULL shmem object (icons never reached SpringBoard).
 		dtape_map_shared_entry_t* entry;
 		dtape_map_shared_entry_t* tmp;
-		RB_FOREACH_SAFE(entry, dtape_map_shared_entry_head, &map->shared_entries, tmp) {
+		DTAPE_FOREACH_OVERLAP_SAFE(entry, tmp, map, start, size) {
 			if (entry->address + entry->size <= start || entry->address >= start + size) {
 				continue;
 			}
@@ -1367,7 +1391,7 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
 		dtape_mutex_lock(&target_map->shared_entry_lock);
 		dtape_map_shared_entry_t* entry;
 		dtape_map_shared_entry_t* tmp;
-		RB_FOREACH_SAFE(entry, dtape_map_shared_entry_head, &target_map->shared_entries, tmp) {
+		DTAPE_FOREACH_OVERLAP_SAFE(entry, tmp, target_map, target_addr, map_size) {
 			if (entry->address + entry->size <= target_addr || entry->address >= target_addr + map_size) {
 				continue;
 			}
