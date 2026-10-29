@@ -547,7 +547,10 @@ kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_inf
 		};
 
 		default:
-			dtape_stub_unsafe("unimplemented flavor");
+			// x86Code: an unknown flavor (iOS 27's arm64 daemons ask for some) is KERN_INVALID_ARGUMENT, as XNU
+			// answers flavors it doesn't have; aborting here took the whole container down
+			dtape_log_warning("task_info: unimplemented flavor %d", flavor);
+			return KERN_INVALID_ARGUMENT;
 	}
 };
 
