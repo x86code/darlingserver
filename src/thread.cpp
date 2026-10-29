@@ -51,6 +51,14 @@
 #include <atomic> // x86Code
 
 // 64KiB should be enough for us
+// x86Code: microthread context switches without glibc's rt_sigprocmask per getcontext()/setcontext() (src/fastcontext.cpp)
+extern "C" int dserver_getcontext(ucontext_t* ucp) __attribute__((returns_twice));
+extern "C" int dserver_setcontext(const ucontext_t* ucp);
+#if !DSERVER_ASAN
+#define getcontext dserver_getcontext
+#define setcontext dserver_setcontext
+#endif
+
 #define THREAD_STACK_SIZE (64 * 1024ULL)
 #define USE_THREAD_GUARD_PAGES 1
 #define IDLE_THREAD_STACK_COUNT 8

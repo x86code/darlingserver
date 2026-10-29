@@ -114,6 +114,7 @@ add_executable(darlingserver
 	src/logging.cpp
 	src/process.cpp
 	src/thread.cpp
+	src/fastcontext.cpp
 	src/utility.cpp
 	src/kqchan.cpp
 	src/async-writer.cpp
