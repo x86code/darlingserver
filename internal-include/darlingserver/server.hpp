@@ -46,6 +46,7 @@ namespace DarlingServer {
 		WorkQueue<std::shared_ptr<Thread>> _workQueue;
 		bool _canRead = false;
 		bool _canWrite = true;
+		bool _listenerWriteInterest = false;
 		int _wakeupFD;
 		int _timerFD;
 		uint64_t _currentTimerDeadline = 0;
@@ -55,6 +56,8 @@ namespace DarlingServer {
 		std::mutex _monitorsLock;
 
 		void _worker(std::shared_ptr<Thread> thread);
+		// the epoll thread only: whether the listener is watched for room to write
+		void _setListenerWriteInterest(bool interested);
 
 		friend struct ::DTapeHooks;
 

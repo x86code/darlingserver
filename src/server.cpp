@@ -484,9 +484,11 @@ DarlingServer::Server::Server(std::string prefix):
 		throw std::system_error(errno, std::generic_category(), "Failed to create epoll context");
 	}
 
+	// EPOLLOUT only while the outbox waits for room (see start()): armed for good, every reply a client reads would wake
+	// the epoll thread for nothing
 	struct epoll_event settings;
 	settings.data.ptr = this;
-	settings.events = EPOLLIN | EPOLLOUT | EPOLLET;
+	settings.events = EPOLLIN | EPOLLET;
 
 	if (epoll_ctl(_epollFD, EPOLL_CTL_ADD, _listenerSocket, &settings) < 0) {
 		throw std::system_error(errno, std::generic_category(), "Failed to add listener socket to epoll context");
@@ -566,6 +568,10 @@ void DarlingServer::Server::start() {
 
 		if (_canWrite) {
 			_canWrite = _outbox.sendMany(_listenerSocket);
+			if (!_canWrite) {
+				// the socket is full: watch for room (re-arming re-evaluates it, so room made since the send is seen)
+				_setListenerWriteInterest(true);
+			}
 		}
 
 		struct epoll_event settings;
@@ -597,6 +603,7 @@ void DarlingServer::Server::start() {
 
 				if (event->events & EPOLLOUT) {
 					_canWrite = true;
+					_setListenerWriteInterest(false);
 				}
 			} else if (event->data.ptr == &_wakeupFD) {
 				// we allow the loop to go back to the top and try to send some messages
@@ -842,6 +849,22 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
 	return _fd;
 };
 
+void DarlingServer::Server::_setListenerWriteInterest(bool interested) {
+	if (interested == _listenerWriteInterest) {
+		return;
+	}
+	struct epoll_event settings;
+	settings.data.ptr = this;
+	settings.events = EPOLLIN | EPOLLET | (interested ? EPOLLOUT : 0);
+	if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _listenerSocket, &settings) < 0) {
+		throw std::system_error(errno, std::generic_category(), "Failed to modify listener socket in epoll context");
+	}
+	_listenerWriteInterest = interested;
+};
+
+// A reply leaves from the replying thread (the worker), saving the epoll thread a wakeup; when the outbox has messages
+// waiting, or the socket is full, it's queued for the epoll thread as before. Measured with one worker
+// (DSERVER_SINGLE_THREADED): with many, each worker holds the outbox lock across its own send.
 void DarlingServer::Server::sendMessage(Message&& message) {
-	_outbox.push(std::move(message));
+	_outbox.pushOrSend(std::move(message), _listenerSocket);
 };

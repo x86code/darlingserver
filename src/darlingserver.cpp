@@ -731,7 +731,20 @@ int main(int argc, char** argv) {
 	// this is the parent
 	close(childWaitFDs[0]);
 
-	// drop our privileges
+	// drop our privileges. For good: Message reads its credentials once, when the first one is made (in the Server, below),
+	// so none may be made before this, and darlingserver's credentials may not change after it.
+	// x86Code (willi/darlingserver#20): run at nice -10 while we're still root. Every Mach call and trap of every Darling
+	// process waits on darlingserver, so at nice 0 a call queued behind the work of the very processes waiting for it.
+	// On Linux this sets this thread's nice value and the Server's workers (made below) inherit it; launchd, cloned
+	// above, and every process it starts keep the nice value we started with. DSERVER_NICE=<n> overrides (0: unchanged).
+	{
+		const char* niceEnv = getenv("DSERVER_NICE");
+		int niceValue = niceEnv ? atoi(niceEnv) : -10;
+		if (niceValue != 0 && setpriority(PRIO_PROCESS, 0, niceValue) != 0) {
+			fprintf(stderr, "Warning: failed to set darlingserver's nice value to %d: %s\n", niceValue, strerror(errno));
+		}
+	}
+
 	perma_drop_privileges(originalUID, originalGID);
 	prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
 

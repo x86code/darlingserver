@@ -35,7 +35,8 @@ namespace DarlingServer {
 		std::weak_ptr<DarlingServer::Process> _process;
 		std::shared_ptr<FD> _socket;
 		std::shared_ptr<Monitor> _monitor;
-		MessageQueue _inbox;
+		// one slot: the peer, a libkqueue filter, sends a request and waits for its reply
+		MessageQueue _inbox{1};
 		MessageQueue _outbox;
 		bool _canSend = false;
 		std::mutex _notificationMutex;

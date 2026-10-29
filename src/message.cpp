@@ -24,6 +24,22 @@
 #include <new>
 #include <mutex>
 #include <system_error>
+#include <algorithm> // x86Code
+#include <cstring> // x86Code
+
+// x86Code (willi/darlingserver#15): the credentials a Message sends with (SCM_CREDENTIALS), read once: three syscalls
+// for every Message. They don't change once the first Message exists: main() drops privileges for good before it
+// creates the Server, and darlingserver never forks a process that makes Messages (its one clone() runs launchd).
+static const struct ucred& ourCredentials() {
+	static const struct ucred credentials = [] {
+		struct ucred creds;
+		creds.pid = getpid();
+		creds.uid = getuid();
+		creds.gid = getgid();
+		return creds;
+	}();
+	return credentials;
+};
 
 DarlingServer::Address::Address() {
 	_address.sun_family = AF_UNIX;
@@ -65,12 +81,8 @@ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std:
 	_controlHeader->cmsg_len = CMSG_LEN(sizeof(struct ucred));
 	_controlHeader->cmsg_level = SOL_SOCKET;
 	_controlHeader->cmsg_type = SCM_CREDENTIALS;
-	struct ucred ourCreds;
-	ourCreds.pid = getpid();
-	ourCreds.uid = getuid();
-	ourCreds.gid = getgid();
 	// the cmsg man page says memcpy should be used with CMSG_DATA instead of direct pointer access
-	memcpy(CMSG_DATA(_controlHeader), &ourCreds, sizeof(ourCreds));
+	memcpy(CMSG_DATA(_controlHeader), &ourCredentials(), sizeof(struct ucred));
 
 	if (descriptorSpace > 0) {
 		auto fdHeader = reinterpret_cast<decltype(_controlHeader)>(reinterpret_cast<char*>(_controlHeader) + CMSG_SPACE(sizeof(struct ucred)));
@@ -348,11 +360,7 @@ void DarlingServer::Message::_ensureCredentialsHeader() {
 	credHeader->cmsg_level = SOL_SOCKET;
 	credHeader->cmsg_type = SCM_CREDENTIALS;
 
-	struct ucred creds;
-	creds.pid = getpid();
-	creds.uid = getuid();
-	creds.gid = getgid();
-	memcpy(CMSG_DATA(credHeader), &creds, sizeof(struct ucred));
+	memcpy(CMSG_DATA(credHeader), &ourCredentials(), sizeof(struct ucred));
 };
 
 void DarlingServer::Message::_ensureDescriptorHeader(size_t newSpace) {
@@ -497,8 +505,33 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
 };
 
 bool DarlingServer::MessageQueue::sendMany(int socket) {
-	bool canSendMore = true;
 	std::scoped_lock lock(_lock);
+	return _sendManyLocked(socket);
+};
+
+// the lock is held from the emptiness check through the send, so messages leave in the order they were pushed,
+// whichever thread sends them
+void DarlingServer::MessageQueue::pushOrSend(Message&& message, int socket) {
+	std::unique_lock lock(_lock);
+	bool wasEmpty = _messages.empty();
+	_messages.push_back(std::move(message));
+
+	if (wasEmpty) {
+		_sendManyLocked(socket);
+		if (_messages.empty()) {
+			return;
+		}
+	}
+
+	auto callback = _messageArrivalNotificationCallback;
+	lock.unlock();
+	if (callback) {
+		callback();
+	}
+};
+
+bool DarlingServer::MessageQueue::_sendManyLocked(int socket) {
+	bool canSendMore = true;
 	struct mmsghdr mmsgs[16];
 	size_t len = 0;
 	int ret = 0;
@@ -566,15 +599,21 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
 	struct mmsghdr mmsgs[16];
 	int ret = 0;
 
-	while (ret >= 0) {
-		std::array<Message, sizeof(mmsgs) / sizeof(*mmsgs)> messages;
+	// the slots outlive the call, so a pass (a call makes one per batch it takes, and a last one that ends in EAGAIN) costs
+	// a new Message only for each message it takes, not for every slot it offers. recvmmsg() fills copies of their
+	// headers, so a slot it didn't fill is as it was made.
+	auto& messages = _receiveSlots;
+	if (messages.empty()) {
+		messages.resize(std::clamp<size_t>(_receiveWidth, 1, sizeof(mmsgs) / sizeof(*mmsgs)));
+	}
 
+	while (ret >= 0) {
 		for (size_t i = 0; i < messages.size(); ++i) {
 			mmsgs[i].msg_hdr = messages[i].rawHeader();
 			mmsgs[i].msg_len = 0;
 		}
 
-		ret = recvmmsg(socket, mmsgs, sizeof(mmsgs) / sizeof(*mmsgs), MSG_CMSG_CLOEXEC | MSG_DONTWAIT, nullptr);
+		ret = recvmmsg(socket, mmsgs, messages.size(), MSG_CMSG_CLOEXEC | MSG_DONTWAIT, nullptr);
 
 		if (ret < 0) {
 			if (errno == EAGAIN) {
@@ -592,6 +631,7 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
 			messages[i].data().resize(mmsgs[i].msg_len);
 			messages[i].setAddress(Address(*(const struct sockaddr_un*)mmsgs[i].msg_hdr.msg_name, mmsgs[i].msg_hdr.msg_namelen));
 			_messages.push_back(std::move(messages[i]));
+			messages[i] = Message();
 		}
 	}
 
