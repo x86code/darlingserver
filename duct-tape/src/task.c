@@ -321,6 +321,11 @@ kern_return_t task_get_state(task_t  task, int flavor, thread_state_t state, mac
 };
 
 kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_info_out, mach_msg_type_number_t* task_info_count) {
+	// x86Code: as XNU's task_info: a port that names no task (a debugger asking for TASK_DYLD_INFO of a process that
+	// just died) is KERN_INVALID_ARGUMENT; this dereferenced NULL and took darlingserver (the whole container) down
+	if (xtask == TASK_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
 	dtape_task_t* task = dtape_task_for_xnu_task(xtask);
 
 	switch (flavor) {
