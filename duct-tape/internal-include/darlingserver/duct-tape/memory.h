@@ -42,6 +42,8 @@ struct _vm_map {
 	// x86Code: the largest size of any entry ever inserted: entries overlapping [a, b) start in [a - max, b),
 	// so a lookup walks only those instead of the whole tree (entries outlive munmap, the tree only grows)
 	uint64_t max_entry_size;
+	// x86Code: when the entries were last checked against the process's mappings (dtape_map_prune_shared_entries)
+	uint64_t last_prune_ns;
 };
 
 typedef struct _vm_map dtape_map_t;
@@ -61,6 +63,8 @@ struct vm_map_copy {
 		vm_object_t object;
 		void* kdata;
 	} c_u;
+	// x86Code: >= 0 when the data is in a frozen memfd instead of dtape_copy_data (large copies, memory.c)
+	int dtape_frozen_fd;
 	char dtape_copy_data[];
 };
 

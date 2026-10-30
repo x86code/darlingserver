@@ -330,7 +330,7 @@ struct DTapeHooks {
 
 	static uintptr_t dtape_hook_task_map_file(void* task_context, int fd, size_t page_count, int protection, uintptr_t address_hint, size_t page_offset, dtape_memory_flags_t flags) {
 		try {
-			return static_cast<DarlingServer::Process*>(task_context)->mapFile(fd, page_count, protection, address_hint, page_offset, flags & dtape_memory_flag_fixed, flags & dtape_memory_flag_overwrite);
+			return static_cast<DarlingServer::Process*>(task_context)->mapFile(fd, page_count, protection, address_hint, page_offset, flags & dtape_memory_flag_fixed, flags & dtape_memory_flag_overwrite, flags & dtape_memory_flag_private);
 		} catch (std::system_error e) {
 			return 0;
 		}

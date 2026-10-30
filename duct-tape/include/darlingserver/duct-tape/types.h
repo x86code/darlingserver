@@ -57,6 +57,7 @@ typedef enum dtape_memory_flags {
 	dtape_memory_flag_none = 0,
 	dtape_memory_flag_fixed = 1ULL << 0,
 	dtape_memory_flag_overwrite = 1ULL << 1,
+	dtape_memory_flag_private = 1ULL << 2, // x86Code: task_map_file maps MAP_PRIVATE (copy-on-write)
 } dtape_memory_flags_t;
 
 #if DSERVER_EXTENDED_DEBUG

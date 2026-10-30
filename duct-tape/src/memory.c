@@ -48,6 +48,12 @@ int fstat(int fd, void* buf); // x86Code: x86_64 struct stat, only st_ino is rea
 static dtape_map_shared_descriptor_t* all_descriptors[DTAPE_DESC_BUCKETS];
 #define DTAPE_DESC_BUCKET(inode) (&all_descriptors[((inode) * 0x9E3779B97F4A7C15ull) >> 54])
 static dtape_mutex_t all_descriptors_lock;
+// x86Code: frozen snapshots for copy=TRUE vm_maps of large memory entries (see mach_vm_map_external)
+static dtape_mutex_t frozen_lock;
+static struct { int fd; uint64_t size, fp, used; } x86code_frozen[8];
+static uint64_t x86code_frozen_clock;
+static int x86code_frozen_fd(const uint8_t* src, uint64_t size);
+static bool x86code_frozen_enabled(void);
 
 #define MAP_ANONYMOUS 0x20
 #define MAP_SHARED 0x01
@@ -65,6 +71,7 @@ static dtape_mutex_t all_descriptors_lock;
 
 void dtape_memory_init(void) {
 	dtape_mutex_init(&all_descriptors_lock);
+	dtape_mutex_init(&frozen_lock);
 
 };
 
@@ -104,6 +111,7 @@ vm_map_t dtape_vm_map_create(struct dtape_task* task) {
 
 	RB_INIT(&map->shared_entries);
 	map->max_entry_size = 0;
+	map->last_prune_ns = 0;
 	dtape_mutex_init(&map->shared_entry_lock);
 
 	return map;
@@ -255,8 +263,45 @@ static size_t dtape_map_find_shared_entries_locked(dtape_map_t* map, uint64_t ad
 	return count;
 };
 
-// TODO: we should have the process inform us when it unmaps a shared entry that we remapped;
-//       right now, we only close the memfd when the process dies (so the memory is potentially in-use needlessly).
+// x86Code: the process doesn't tell us when it unmaps a shared entry that we remapped, and entries used to be dropped
+// only when the process died: every memfd a long-lived process ever shared stayed alive in darlingserver after the
+// process freed the memory. After a 10 min boot darlingserver held 1,827 memfds (1.03 GB of shmem), 1,202 of them
+// (0.9 GB, mostly IOSurface-sized: 12 MB full-screen buffers, 5-8 MB layers) mapped by no process at all.
+// So an entry is dropped once the process no longer maps its memfd at the entry's address: checked with one
+// PROCMAP_QUERY per entry, at most every DTAPE_PRUNE_INTERVAL_NS per map, when the map shares something (the only
+// time new entries appear). A memfd still referenced by a memory entry port stays (that is a real reference).
+#define DTAPE_PRUNE_INTERVAL_NS (2ULL * 1000 * 1000 * 1000)
+
+static bool dtape_entry_still_mapped(vm_map_t map, uint64_t address, dtape_map_shared_entry_t* entry) {
+	dtape_memory_region_info_t info;
+	if (!dtape_hooks->task_get_memory_region_info(map->dtape_task->context, address, &info)) {
+		return false;
+	}
+	return info.shared && info.inode == entry->descriptor->inode &&
+		info.map_offset + (address - info.start_address) == (entry->page_offset << map->dtape_page_shift) + (address - entry->address);
+};
+
+static void dtape_map_prune_shared_entries(vm_map_t map) {
+	uint64_t now = mach_absolute_time(); // nanoseconds here (_rtc_nanotime_read)
+	dtape_mutex_lock(&map->shared_entry_lock);
+	if (now - map->last_prune_ns < DTAPE_PRUNE_INTERVAL_NS || !map->dtape_task) {
+		dtape_mutex_unlock(&map->shared_entry_lock);
+		return;
+	}
+	map->last_prune_ns = now;
+	dtape_map_shared_entry_t* entry;
+	dtape_map_shared_entry_t* tmp;
+	RB_FOREACH_SAFE(entry, dtape_map_shared_entry_head, &map->shared_entries, tmp) {
+		uint64_t last = entry->address + entry->size - (1ULL << map->dtape_page_shift);
+		// kept while either end is still that memfd at that offset (a partial munmap keeps the rest shared)
+		if (dtape_entry_still_mapped(map, entry->address, entry) || (last != entry->address && dtape_entry_still_mapped(map, last, entry))) {
+			continue;
+		}
+		RB_REMOVE(dtape_map_shared_entry_head, &map->shared_entries, entry);
+		dtape_map_shared_entry_destroy(entry);
+	}
+	dtape_mutex_unlock(&map->shared_entry_lock);
+};
 
 void dtape_vm_map_destroy(vm_map_t map) {
 	if (os_ref_release(&map->map_refcnt) != 0) {
@@ -458,6 +503,9 @@ void vm_map_copy_discard(vm_map_copy_t copy) {
 	if (copy == VM_MAP_COPY_NULL) {
 		return;
 	}
+	if (copy->dtape_frozen_fd >= 0) {
+		close(copy->dtape_frozen_fd);
+	}
 	free(copy);
 };
 
@@ -469,6 +517,35 @@ kern_return_t vm_map_copyin_common(vm_map_t src_map, vm_map_address_t src_addr, 
 
 	kern_return_t kr;
 
+	// x86Code: a large copy from a task (lsd sends its 8 MB LaunchServices store to every client this way) goes into a
+	// frozen memfd, deduplicated by contents, that the receiver maps MAP_PRIVATE (copy-on-write): receivers share pages.
+	if (len >= 0x100000 && src_map != kernel_map && x86code_frozen_enabled()) {
+		void* buf = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (buf != MAP_FAILED) {
+			int fd = -1;
+			if (copyinmap(src_map, src_addr, buf, (vm_size_t)len) == KERN_SUCCESS) {
+				fd = x86code_frozen_fd(buf, len);
+			}
+			munmap(buf, len);
+			vm_map_copy_t copy = (fd >= 0) ? malloc(sizeof(struct vm_map_copy)) : NULL;
+			if (copy) {
+				copy->type = VM_MAP_COPY_KERNEL_BUFFER;
+				copy->size = len;
+				copy->offset = 0;
+				copy->cpy_kdata = NULL;
+				copy->dtape_frozen_fd = fd;
+				if (src_destroy) {
+					vm_map_remove(src_map, vm_map_trunc_page(src_addr, VM_MAP_PAGE_MASK(src_map)), vm_map_round_page(src_addr + len, VM_MAP_PAGE_MASK(src_map)), 0);
+				}
+				*copy_result = copy;
+				return KERN_SUCCESS;
+			}
+			if (fd >= 0) {
+				close(fd);
+			}
+		}
+	}
+
 	vm_map_copy_t copy = malloc(sizeof(struct vm_map_copy) + len);
 	if (copy == NULL) {
 		return KERN_RESOURCE_SHORTAGE;
@@ -478,6 +555,7 @@ kern_return_t vm_map_copyin_common(vm_map_t src_map, vm_map_address_t src_addr, 
 	copy->size = len;
 	copy->offset = 0;
 	copy->cpy_kdata = copy->dtape_copy_data;
+	copy->dtape_frozen_fd = -1;
 
 	kr = copyinmap(src_map, src_addr, copy->cpy_kdata, (vm_size_t)len);
 	if (kr != KERN_SUCCESS) {
@@ -493,8 +571,59 @@ kern_return_t vm_map_copyin_common(vm_map_t src_map, vm_map_address_t src_addr, 
 	return KERN_SUCCESS;
 };
 
+// x86Code: copyout of a frozen-memfd copy: a MAP_PRIVATE mapping of the memfd at a new address, or over a page-aligned
+// range of private anonymous memory (vm_copy/overwrite); anything else gets the bytes written as before.
+static kern_return_t x86code_copyout_frozen(vm_map_t map, vm_map_address_t* addr, vm_map_copy_t copy, vm_map_size_t copy_size, boolean_t overwrite) {
+	int fd = copy->dtape_frozen_fd;
+	size_t pages = dtape_byte_count_to_page_count_round_up(copy_size);
+	size_t rounded = (copy_size + 0xfff) & ~0xfffull;
+	if (map == kernel_map) {
+		void* p = mmap(overwrite ? (void*)*addr : NULL, rounded, PROT_READ | PROT_WRITE, MAP_PRIVATE | (overwrite ? 0x10 /* MAP_FIXED */ : 0), fd, 0);
+		if (p == MAP_FAILED) {
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		*addr = (uintptr_t)p;
+		return KERN_SUCCESS;
+	}
+	if (!overwrite) {
+		uintptr_t a = dtape_hooks->task_map_file(map->dtape_task->context, fd, pages, PROT_READ | PROT_WRITE, 0, 0, dtape_memory_flag_private);
+		if (!a) {
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		*addr = a;
+		return KERN_SUCCESS;
+	}
+	dtape_memory_region_info_t info;
+	if (!(*addr & 0xfff) && !(copy_size & 0xfff) && dtape_hooks->task_get_memory_region_info(map->dtape_task->context, *addr, &info) &&
+		!info.shared && info.inode == 0 && info.start_address + (info.page_count << map->dtape_page_shift) >= *addr + copy_size) {
+		int prot = 0;
+		if (info.protection & dtape_memory_protection_read) prot |= PROT_READ;
+		if (info.protection & dtape_memory_protection_write) prot |= PROT_WRITE;
+		if (info.protection & dtape_memory_protection_execute) prot |= PROT_EXEC;
+		if (dtape_hooks->task_map_file(map->dtape_task->context, fd, pages, prot, *addr, 0, dtape_memory_flag_fixed | dtape_memory_flag_overwrite | dtape_memory_flag_private) == *addr) {
+			return KERN_SUCCESS;
+		}
+	}
+	const void* src = mmap(NULL, rounded, PROT_READ, MAP_SHARED, fd, 0);
+	if (src == MAP_FAILED) {
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	kern_return_t kr = copyoutmap(map, (void*)src, *addr, (vm_size_t)copy_size);
+	munmap((void*)src, rounded);
+	return kr;
+};
+
 static kern_return_t vm_map_copyout_kernel_buffer(vm_map_t map, vm_map_address_t* addr, vm_map_copy_t copy, vm_map_size_t copy_size, boolean_t overwrite, boolean_t consume_on_success) {
 	kern_return_t kr = KERN_SUCCESS;
+
+	if (copy->dtape_frozen_fd >= 0) {
+		kr = x86code_copyout_frozen(map, addr, copy, copy_size, overwrite);
+		if (kr == KERN_SUCCESS && consume_on_success) {
+			close(copy->dtape_frozen_fd);
+			free(copy);
+		}
+		return kr;
+	}
 
 	if (!overwrite) {
 		// we need to allocate memory for this copy
@@ -830,6 +959,7 @@ static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t si
 	if (region_info.protection & dtape_memory_protection_execute) { prot |= PROT_EXEC; vm_prot |= VM_PROT_EXECUTE; }
 	*out_prot = vm_prot;
 
+	dtape_map_prune_shared_entries(map);
 	dtape_mutex_lock(&map->shared_entry_lock);
 	count = dtape_map_find_shared_entries_locked(map, start, size, existing, sizeof(existing) / sizeof(*existing));
 	// x86Code: entries are not dropped on munmap, so an entry may describe memory the process no longer maps
@@ -998,6 +1128,84 @@ int dtape_memfd_for_region(uint64_t address, uint64_t size, int* out_fd, uint64_
 	return 0;
 };
 
+// x86Code: a copy=TRUE vm_map of a large memory entry (lsd's 8 MB LaunchServices store, mapped by every LS client, a new
+// entry per send) used to write a private copy into each receiver. Instead the bytes go into a frozen memfd that nobody
+// ever maps shared or writes, and the receiver maps it MAP_PRIVATE: same snapshot semantics (its own writes stay
+// private), but receivers of the same contents share the pages. Snapshots are found by size + a sampled fingerprint and
+// verified with a full memcmp; the last 8 are kept. Returns a dup'd fd of the snapshot, or -1 (then: copy as before).
+static bool x86code_frozen_enabled(void) {
+	static int enabled = -1;
+	if (enabled < 0) {
+		const char* e = getenv("X86CODE_FROZEN_SNAPSHOTS");
+		enabled = !(e && *e == '0');
+	}
+	return enabled;
+};
+// A dup'd fd of a frozen memfd holding these `size` bytes (an existing one with the same contents, or a new one), or -1.
+static int x86code_frozen_fd(const uint8_t* src, uint64_t size) {
+	uint64_t fp = size * 0x9e3779b97f4a7c15ull;
+	for (uint64_t k = 0; k < 256; k++) {
+		uint64_t w;
+		memcpy(&w, src + ((size - 8) / 255) * k, 8);
+		fp = (fp ^ w) * 0x100000001b3ull;
+	}
+	int result = -1;
+	dtape_mutex_lock(&frozen_lock);
+	int victim = 0;
+	for (int i = 0; i < 8 && result < 0; i++) {
+		if (x86code_frozen[i].used < x86code_frozen[victim].used) {
+			victim = i;
+		}
+		if (!x86code_frozen[i].used || x86code_frozen[i].size != size || x86code_frozen[i].fp != fp) {
+			continue;
+		}
+		const void* snap = mmap(NULL, size, PROT_READ, MAP_SHARED, x86code_frozen[i].fd, 0);
+		if (snap != MAP_FAILED) {
+			if (memcmp(snap, src, size) == 0) {
+				x86code_frozen[i].used = ++x86code_frozen_clock;
+				result = dup(x86code_frozen[i].fd);
+			}
+			munmap((void*)snap, size);
+		}
+	}
+	if (result < 0) {
+		uint64_t rounded = (size + 0xfff) & ~0xfffull;
+		int fd = memfd_create("darling-frozen-copy", MFD_CLOEXEC);
+		void* dst = MAP_FAILED;
+		if (fd >= 0 && ftruncate(fd, rounded) == 0) {
+			dst = mmap(NULL, rounded, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		}
+		if (dst != MAP_FAILED) {
+			memcpy(dst, src, size);
+			munmap(dst, rounded);
+			if (x86code_frozen[victim].used) {
+				close(x86code_frozen[victim].fd);
+			}
+			x86code_frozen[victim].fd = fd;
+			x86code_frozen[victim].size = size;
+			x86code_frozen[victim].fp = fp;
+			x86code_frozen[victim].used = ++x86code_frozen_clock;
+			result = dup(fd);
+		} else if (fd >= 0) {
+			close(fd);
+		}
+	}
+	dtape_mutex_unlock(&frozen_lock);
+	return result;
+};
+static int x86code_frozen_snapshot(int memfd, uint64_t offset, uint64_t size) {
+	if (!x86code_frozen_enabled()) {
+		return -1;
+	}
+	const uint8_t* src = mmap(NULL, size, PROT_READ, MAP_SHARED, memfd, offset);
+	if (src == MAP_FAILED) {
+		return -1;
+	}
+	int result = x86code_frozen_fd(src, size);
+	munmap((void*)src, size);
+	return result;
+};
+
 kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* address, mach_vm_size_t initial_size, mach_vm_offset_t mask, int flags, ipc_port_t port, vm_object_offset_t offset, boolean_t copy, vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance) {
 	// x86Code: was a stub that returned success without mapping anything
 	int prot = 0;
@@ -1033,7 +1241,14 @@ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* addres
 		size = mach_vm_round_page(entry->size - mach_vm_trunc_page(offset));
 	}
 
-	if (copy) {
+	int frozen_fd = (copy && size >= 0x40000) ? x86code_frozen_snapshot(descriptor->memfd, file_offset, size) : -1;
+	if (frozen_fd >= 0) {
+		addr = dtape_hooks->task_map_file(target_map->dtape_task->context, frozen_fd, dtape_byte_count_to_page_count_round_up(size), prot, hint, 0, memflags | dtape_memory_flag_private);
+		close(frozen_fd);
+		if (!addr) {
+			return KERN_NO_SPACE;
+		}
+	} else if (copy) {
 		// private copy of the current contents
 		addr = dtape_hooks->task_allocate_pages(target_map->dtape_task->context, dtape_byte_count_to_page_count_round_up(size), prot | PROT_WRITE, hint, memflags);
 		if (!addr) {

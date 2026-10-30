@@ -777,9 +777,9 @@ void DarlingServer::Process::freePages(uintptr_t address, size_t pageCount) {
 	});
 };
 
-uintptr_t DarlingServer::Process::mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite) {
+uintptr_t DarlingServer::Process::mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite, bool priv) {
 	return _performS2C([&](const std::shared_ptr<Thread>& thread) {
-		return thread->mapFile(fd, pageCount, protection, addressHint, pageOffset, fixed, overwrite);
+		return thread->mapFile(fd, pageCount, protection, addressHint, pageOffset, fixed, overwrite, priv);
 	});
 };
 
