@@ -1505,6 +1505,8 @@ for call in calls:
 	library_source.write("\t}\n\n")
 
 	library_source.write("retry_receive:\n")
+	# x86Code: a pushed unknown reply's recvmsg shrank msg_controllen; restore it before receiving again
+	library_source.write("\treplymsg.msg_controllen = sizeof(controlbuf);\n")
 	library_source.write("\tlong_status = dserver_rpc_hooks_receive_message(server_socket, &replymsg);\n\n")
 
 	library_source.write("\tif (long_status == dserver_rpc_hooks_get_interrupt_status()) {\n")
