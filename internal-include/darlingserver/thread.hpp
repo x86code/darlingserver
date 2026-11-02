@@ -95,6 +95,8 @@ namespace DarlingServer {
 		bool _terminating = false;
 		std::shared_ptr<Call> _activeCall = nullptr;
 		std::shared_ptr<Thread> _impersonating = nullptr;
+		// x86Code (Speed 32): _impersonating's raw pointer, for current_thread() without the rwlock and shared_ptr copies
+		std::atomic<Thread*> _impersonatingRaw{nullptr};
 		bool _processingSignal = false;
 		bool _pendingCallOverride = false;
 		dtape_semaphore_t* _s2cPerformSempahore = nullptr;
@@ -296,6 +298,8 @@ namespace DarlingServer {
 		static void syscallReturn(int resultCode);
 
 		static std::shared_ptr<Thread> currentThread();
+		// x86Code (Speed 32): no shared_ptr copy (the thread-local keeps it alive while it is current)
+		static Thread* currentThreadRaw();
 
 		/**
 		 * Returns the Thread that corresponds to the given thread port in the current port space.

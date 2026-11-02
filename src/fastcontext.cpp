@@ -41,8 +41,10 @@ __asm__(
 	"	movq %rcx, 160(%rdi)\n"
 	"	leaq 424(%rdi), %rcx\n"     // uc_mcontext.fpregs = &__fpregs_mem, as glibc does
 	"	movq %rcx, 224(%rdi)\n"
-	"	fnstenv (%rcx)\n"
-	"	fldenv (%rcx)\n"            // fnstenv masks the x87 exceptions: restore them
+	// x86Code (Speed 32): only the x87 control word. These switches happen at call boundaries, where the ABI leaves the
+	// x87 stack empty and the status word holds nothing a callee relies on; fnstenv + fldenv (serializing, ~10% of
+	// darlingserver's own time per RPC) saved and reloaded the whole environment
+	"	fnstcw (%rcx)\n"
 	"	stmxcsr 448(%rdi)\n"
 	"	xorl %eax, %eax\n"
 	"	ret\n"
@@ -53,7 +55,7 @@ __asm__(
 	"dserver_setcontext:\n"
 	"	movq %rdi, %rdx\n"
 	"	movq 224(%rdx), %rcx\n"
-	"	fldenv (%rcx)\n"
+	"	fldcw (%rcx)\n"
 	"	ldmxcsr 448(%rdx)\n"
 	"	movq 160(%rdx), %rsp\n"
 	"	movq 128(%rdx), %rbx\n"

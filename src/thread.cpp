@@ -709,6 +709,10 @@ std::shared_ptr<DarlingServer::Thread> DarlingServer::Thread::currentThread() {
 	return currentThreadVar;
 };
 
+DarlingServer::Thread* DarlingServer::Thread::currentThreadRaw() {
+	return currentThreadVar.get();
+};
+
 void DarlingServer::Thread::setupKernelThread(std::function<void()> startupCallback) {
 	std::unique_lock lock(_rwlock);
 	_continuationCallback = startupCallback;
@@ -740,6 +744,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
 		std::unique_lock lock(_rwlock);
 		oldThread = _impersonating;
 		_impersonating = thread;
+		_impersonatingRaw.store(thread.get(), std::memory_order_release);
 	}
 
 	if (oldThread) {

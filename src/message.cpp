@@ -633,6 +633,14 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
 			_messages.push_back(std::move(messages[i]));
 			messages[i] = Message();
 		}
+
+		// x86Code (Speed 32): a short batch means the queue was empty when recvmmsg() looked. The listener is
+		// edge-triggered and a datagram queued after that look raises a new edge, so the extra pass that only ended in
+		// EAGAIN (one syscall per RPC at low load) is not needed.
+		if (ret > 0 && (size_t)ret < messages.size()) {
+			canReadMore = false;
+			break;
+		}
 	}
 
 	if (_messages.size() > 0) {

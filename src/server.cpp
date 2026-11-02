@@ -79,12 +79,15 @@ struct DTapeHooks {
 		return process->_dtapeTask;
 	};
 
+	// x86Code (Speed 32): XNU code calls current_thread() all the time (a third of darlingserver's own CPU per mach_msg
+	// went to the shared_ptr copies and the rwlock here). Only the thread itself changes what it impersonates, and the
+	// impersonated thread is kept alive by _impersonating, so the raw pointers are enough.
 	static dtape_thread_t* dtape_hook_current_thread(void) {
-		auto thread = DarlingServer::Thread::currentThread();
+		auto thread = DarlingServer::Thread::currentThreadRaw();
 		if (!thread) {
 			return NULL;
 		}
-		if (auto fakeThread = thread->impersonatingThread()) {
+		if (auto fakeThread = thread->_impersonatingRaw.load(std::memory_order_acquire)) {
 			thread = fakeThread;
 		}
 		return thread->_dtapeThread;
