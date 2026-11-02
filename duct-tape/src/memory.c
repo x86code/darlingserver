@@ -1567,6 +1567,105 @@ kern_return_t mach_vm_region_recurse(vm_map_t map, mach_vm_address_t* address, m
 // mmap(4x size) + vm_remap(&new, old size, VM_FLAGS_OVERWRITE, old) and keeps using `new` as the base: the old
 // pages landed elsewhere, the new region's head was unmapped, and every app with SwiftUI (Settings search) crashed
 // in AG::data::table::alloc_page on the second grow. Now the target honours VM_FLAGS_ANYWHERE/FIXED/OVERWRITE.
+static void x86code_replace_target_entry(vm_map_t target_map, uintptr_t addr, size_t size, uint64_t page_offset, dtape_map_shared_descriptor_t* descriptor) {
+	dtape_map_shared_entry_t* target_shared_entry = dtape_map_shared_entry_create(addr, size, page_offset, descriptor);
+	if (!target_shared_entry) {
+		return;
+	}
+	dtape_mutex_lock(&target_map->shared_entry_lock);
+	dtape_map_shared_entry_t* entry;
+	dtape_map_shared_entry_t* tmp;
+	DTAPE_FOREACH_OVERLAP_SAFE(entry, tmp, target_map, addr, size) {
+		if (entry->address + entry->size <= addr || entry->address >= addr + size) {
+			continue;
+		}
+		RB_REMOVE(dtape_map_shared_entry_head, &target_map->shared_entries, entry);
+		dtape_map_shared_entry_destroy(entry);
+	}
+	dtape_map_insert_shared_entry_locked(target_map, target_shared_entry);
+	dtape_mutex_unlock(&target_map->shared_entry_lock);
+};
+
+static kern_return_t mach_vm_remap_external_shared_pieces(vm_map_t target_map, mach_vm_offset_t* address, mach_vm_size_t size, int flags, vm_map_t src_map, mach_vm_offset_t memory_address, vm_prot_t* cur_protection, vm_prot_t* max_protection) {
+	uintptr_t end_memaddr = mach_vm_round_page(memory_address + size);
+	uintptr_t start_memaddr = mach_vm_trunc_page(memory_address);
+	size_t map_size = end_memaddr - start_memaddr;
+	uintptr_t base = 0;
+	vm_prot_t all_prot = VM_PROT_ALL;
+	uintptr_t at = start_memaddr;
+
+	while (at < end_memaddr) {
+		dtape_memory_region_info_t ri;
+		if (!dtape_hooks->task_get_memory_region_info(src_map->dtape_task->context, at, &ri) || ri.start_address > at) {
+			return KERN_INVALID_ADDRESS;
+		}
+		uintptr_t piece_end = ri.start_address + (ri.page_count << src_map->dtape_page_shift);
+		if (piece_end > end_memaddr || piece_end <= at) {
+			piece_end = end_memaddr;
+		}
+		size_t piece = piece_end - at;
+		dtape_map_shared_descriptor_t* descriptor = NULL;
+		uint64_t byte_offset = 0;
+		vm_prot_t vm_prot = VM_PROT_NONE;
+		kern_return_t kr = dtape_share_region(src_map, at, piece, &descriptor, &byte_offset, &vm_prot);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+		int prot = 0;
+		if (vm_prot & VM_PROT_READ) prot |= PROT_READ;
+		if (vm_prot & VM_PROT_WRITE) prot |= PROT_WRITE;
+		if (vm_prot & VM_PROT_EXECUTE) prot |= PROT_EXEC;
+		all_prot &= vm_prot;
+
+		dtape_memory_flags_t memflags = dtape_memory_flag_none;
+		uintptr_t hint = 0;
+		size_t pages = dtape_byte_count_to_page_count_round_up(piece);
+		if (base) {
+			memflags = dtape_memory_flag_fixed | dtape_memory_flag_overwrite;
+			hint = base + (at - start_memaddr);
+		} else {
+			// the first piece places the whole range (its mapping covers map_size; later pieces overwrite the rest)
+			pages = dtape_byte_count_to_page_count_round_up(map_size);
+			if (!(flags & VM_FLAGS_ANYWHERE)) {
+				memflags |= dtape_memory_flag_fixed;
+				hint = mach_vm_trunc_page(*address);
+			}
+			if (flags & VM_FLAGS_OVERWRITE) {
+				memflags |= dtape_memory_flag_overwrite;
+			}
+		}
+		uintptr_t got = dtape_hooks->task_map_file(target_map->dtape_task->context, descriptor->memfd, pages, prot, hint, byte_offset >> target_map->dtape_page_shift, memflags);
+		if (!got || (hint && got != hint)) {
+			dtape_map_shared_descriptor_release(descriptor);
+			if (!base) {
+				return (flags & VM_FLAGS_ANYWHERE) ? KERN_RESOURCE_SHORTAGE : KERN_NO_SPACE;
+			}
+			return KERN_FAILURE;
+		}
+		if (!base) {
+			base = got;
+		}
+		x86code_replace_target_entry(target_map, got, piece, byte_offset >> target_map->dtape_page_shift, descriptor);
+		dtape_map_shared_descriptor_release(descriptor);
+		at = piece_end;
+	}
+
+	{
+		static int logged = 0;
+		if (logged < 64) {
+			logged++;
+			dtape_log_error("x86code: piecewise shared remap %#lx+%#lx -> %#lx (pid %d)", (unsigned long)start_memaddr, (unsigned long)map_size, (unsigned long)base, src_map->dtape_task ? (int)src_map->dtape_task->saved_pid : -1);
+		}
+	}
+	*max_protection = VM_PROT_ALL;
+	*cur_protection = all_prot;
+	*address = base;
+	if (flags & VM_FLAGS_RETURN_DATA_ADDR) {
+		*address += memory_address - start_memaddr;
+	}
+	return KERN_SUCCESS;
+};
+
 static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_offset_t* address, mach_vm_size_t size, mach_vm_offset_t mask, int flags, vm_map_t src_map, mach_vm_offset_t memory_address, vm_prot_t* cur_protection, vm_prot_t* max_protection, vm_inherit_t inheritance) {
 	uintptr_t end_memaddr = mach_vm_round_page(memory_address + size);
 	uintptr_t start_memaddr = mach_vm_trunc_page(memory_address);
@@ -1576,6 +1675,17 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
 	vm_prot_t vm_prot = VM_PROT_NONE;
 	int prot = 0;
 
+	// x86Code (Speed 36): a source made of several mappings (AttributeGraph's second growth: the first growth's
+	// destination is the old table's memfd followed by fresh anonymous pages) is remapped piece by piece, each piece
+	// shared as it is: memfd pieces keep their memfd, so every earlier alias (the old table, still used through
+	// pointers computed before a rule ran) keeps sharing pages with the new range, as on XNU.
+	{
+		dtape_memory_region_info_t ri;
+		if (dtape_hooks->task_get_memory_region_info(src_map->dtape_task->context, start_memaddr, &ri) &&
+			ri.start_address + (ri.page_count << src_map->dtape_page_shift) < end_memaddr) {
+			return mach_vm_remap_external_shared_pieces(target_map, address, size, flags, src_map, memory_address, cur_protection, max_protection);
+		}
+	}
 	kern_return_t kr = dtape_share_region(src_map, start_memaddr, map_size, &descriptor, &byte_offset, &vm_prot);
 	if (kr != KERN_SUCCESS) {
 		return kr;

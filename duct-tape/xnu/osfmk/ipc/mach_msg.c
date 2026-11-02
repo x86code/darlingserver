@@ -548,6 +548,14 @@ mach_msg_overwrite_trap(
 		    0, 0,
 		    0);
 
+		{
+			// x86Code (Speed 36): message shapes for the fast-path study (see x86code_rpcstats in call.cpp)
+			extern int x86code_rpcstats_on;
+			extern void x86code_rpcstat_msg(unsigned int bits, int rcv);
+			if (x86code_rpcstats_on) {
+				x86code_rpcstat_msg(kmsg->ikm_header->msgh_bits, (option & MACH_RCV_MSG) != 0);
+			}
+		}
 		mr = ipc_kmsg_copyin(kmsg, space, map, priority, &option);
 
 		if (mr != MACH_MSG_SUCCESS) {
@@ -556,6 +564,28 @@ mach_msg_overwrite_trap(
 			goto end;
 		}
 
+		{
+			// x86Code (Speed 36): where simple messages go (fast-path coverage study)
+			extern int x86code_rpcstats_on;
+			extern void x86code_rpcstat_slot(unsigned int slot);
+			mach_msg_header_t* h = kmsg->ikm_header;
+			ipc_port_t dp = h->msgh_remote_port;
+			if (x86code_rpcstats_on && !(h->msgh_bits & MACH_MSGH_BITS_COMPLEX) && IP_VALID(dp)) {
+				unsigned int slot = 510;
+				if (ip_active(dp) && dp->ip_receiver_name != MACH_PORT_NULL) {
+					if (dp->ip_receiver == ipc_space_kernel) {
+						slot = 503;
+					} else if (dp->ip_in_pset) {
+						slot = dp->ip_receiver == space ? 504 : 505;
+					} else if (dp->ip_sync_link_state != PORT_SYNC_LINK_ANY || !SLIST_EMPTY(&dp->ip_messages.imq_klist)) {
+						slot = dp->ip_receiver == space ? 506 : 507;
+					} else {
+						slot = dp->ip_receiver == space ? 508 : 509;
+					}
+				}
+				x86code_rpcstat_slot(slot);
+			}
+		}
 		mr = ipc_kmsg_send(kmsg, option, msg_timeout);
 
 		if (mr != MACH_MSG_SUCCESS) {

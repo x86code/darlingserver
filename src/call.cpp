@@ -34,6 +34,48 @@ static DarlingServer::Log callLog("calls");
 
 DarlingServer::Log DarlingServer::Call::rpcReplyLog("replies");
 
+
+// x86Code (Speed 36): opt-in RPC counters for the mach_msg fast-path study. On while the file
+// /home/bobby/scratch/x86code/ds-rpcstats.on exists (checked once a second); every second with traffic, one line of
+// per-call-number counts and mach_msg shapes is appended to /home/bobby/scratch/x86code/ds-rpcstats.log.
+#include <atomic>
+#include <ctime>
+#include <unistd.h>
+#include <cstdio>
+extern "C" int x86code_rpcstats_on;
+int x86code_rpcstats_on = 0;
+static std::atomic<uint64_t> x86code_calls[512];
+// shapes: 0 simple no-local, 1 simple + local send-once (request), 2 simple + other local, 3 complex, 4 voucher; +5 when combined with a receive
+static std::atomic<uint64_t> x86code_shapes[10];
+extern "C" void x86code_rpcstat_msg(unsigned int bits, int rcv) {
+	int k = (bits & 0x80000000u) ? 3 : ((bits >> 16) & 0x1f) ? 4 : ((bits >> 8) & 0x1f) == 0 ? 0 :
+		((bits >> 8) & 0x1f) == 21 /* MAKE_SEND_ONCE */ ? 1 : 2;
+	x86code_shapes[k + (rcv ? 5 : 0)]++;
+}
+extern "C" void x86code_rpcstat_slot(unsigned slot) {
+	if (x86code_rpcstats_on && slot < 512) x86code_calls[slot]++;
+}
+static void x86code_rpcstats_tick(unsigned number) {
+	static std::atomic<int64_t> last{0};
+	timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+	int64_t sec = ts.tv_sec, l = last.load();
+	if (sec != l && last.compare_exchange_strong(l, sec)) {
+		bool was = x86code_rpcstats_on;
+		x86code_rpcstats_on = access("/home/bobby/scratch/x86code/ds-rpcstats.on", F_OK) == 0;
+		if (was) {
+			FILE* f = fopen("/home/bobby/scratch/x86code/ds-rpcstats.log", "a");
+			if (f) {
+				fprintf(f, "t=%lld calls", (long long)sec);
+				for (int i = 0; i < 512; i++) { uint64_t c = x86code_calls[i].exchange(0); if (c) fprintf(f, " %d:%llu", i, (unsigned long long)c); }
+				fprintf(f, " | shapes");
+				for (int i = 0; i < 10; i++) fprintf(f, " %llu", (unsigned long long)x86code_shapes[i].exchange(0));
+				fprintf(f, "\n");
+				fclose(f);
+			}
+		}
+	}
+	if (x86code_rpcstats_on && number < 512) x86code_calls[number]++;
+}
 std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Message&& requestMessage) {
 	if (requestMessage.data().size() < sizeof(dserver_rpc_callhdr_t)) {
 		throw std::invalid_argument("Message buffer was too small for call header");
@@ -41,6 +83,7 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
 
 	dserver_rpc_callhdr_t* header = reinterpret_cast<dserver_rpc_callhdr_t*>(requestMessage.data().data());
 	std::shared_ptr<Call> result = nullptr;
+	x86code_rpcstats_tick(header->number);
 	std::shared_ptr<Process> process = nullptr;
 	std::shared_ptr<Thread> thread = nullptr;
 
