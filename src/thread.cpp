@@ -993,7 +993,13 @@ int DarlingServer::Thread::setPendingSignal(int signal) {
 };
 
 void DarlingServer::Thread::processSignal(int bsdSignalNumber, int linuxSignalNumber, int code, uintptr_t signalAddress, uintptr_t threadStateAddress, uintptr_t floatStateAddress) {
-	loadStateFromUser(threadStateAddress, floatStateAddress);
+	try {
+		loadStateFromUser(threadStateAddress, floatStateAddress);
+	} catch (std::system_error e) {
+		// x86Code: as in waitWhileUserSuspended (process killed meanwhile)
+		threadLog.warning() << *this << ": failed to load state from user in processSignal: " << e.code() << " (" << e.what() << ")" << threadLog.endLog;
+		return;
+	}
 
 	{
 		std::unique_lock lock(_rwlock);
@@ -1579,7 +1585,14 @@ DarlingServer::Thread::RunState DarlingServer::Thread::getRunState() const {
 };
 
 void DarlingServer::Thread::waitWhileUserSuspended(uintptr_t threadStateAddress, uintptr_t floatStateAddress) {
-	loadStateFromUser(threadStateAddress, floatStateAddress);
+	try {
+		loadStateFromUser(threadStateAddress, floatStateAddress);
+	} catch (std::system_error e) {
+		// x86Code: the process was killed between its suspension signal and this call (SIGKILL of a task-suspended app):
+		// the read fails. Uncaught, this aborted darlingserver and took the whole phone down.
+		threadLog.warning() << *this << ": failed to load state from user in waitWhileUserSuspended: " << e.code() << " (" << e.what() << ")" << threadLog.endLog;
+		return;
+	}
 	dtape_thread_wait_while_user_suspended(_dtapeThread);
 	try {
 		saveStateToUser(threadStateAddress, floatStateAddress);
