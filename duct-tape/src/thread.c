@@ -409,11 +409,25 @@ void dtape_thread_wait_while_user_suspended(dtape_thread_t* thread) {
 		dtape_mutex_unlock(&thread->suspension_mutex);
 		dtape_condvar_signal(&thread->suspension_condvar, SIZE_MAX);
 
-		// FIXME: possible race condition here between notifying of waiting and actually sleeping
+		// x86Code: the suspender's thread_wait() returns as soon as waiting_suspended is set, and a thread_resume()
+		// (JSC's GC: thread_suspend, thread_get_state, thread_resume, a few microseconds apart) could then run
+		// thread_release() before this microthread was suspended: Thread::resume() of a thread that isn't suspended does
+		// nothing, and we slept here for ever with suspend_count 0 (Safari's main thread after a few relaunches: a black
+		// screen). As in thread_block_parameter(): thread_release() decrements and resumes under the wake lock, and we
+		// check the count and suspend under it (the suspension releases it once we're suspended).
+		libsimple_lock_lock(&thread->wake_lock);
+		if (thread->xnu_thread.suspend_count <= 0) {
+			libsimple_lock_unlock(&thread->wake_lock);
+			dtape_mutex_lock(&thread->suspension_mutex);
+			thread->waiting_suspended = false;
+			dtape_mutex_unlock(&thread->suspension_mutex);
+			dtape_condvar_signal(&thread->suspension_condvar, SIZE_MAX);
+			break;
+		}
 
 		thread->xnu_thread.wait_result = THREAD_WAITING;
 
-		dtape_hooks->thread_suspend(thread->context, NULL, NULL, NULL);
+		dtape_hooks->thread_suspend(thread->context, NULL, NULL, &thread->wake_lock);
 
 		dtape_log_debug("sigexc: woken up");
 
@@ -1563,8 +1577,11 @@ void thread_hold(thread_t xthread) {
 void thread_release(thread_t xthread) {
 	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
 	dtape_log_debug("sigexc: thread_release(%p)\n", xthread);
+	// x86Code: under the wake lock, see dtape_thread_wait_while_user_suspended()
+	libsimple_lock_lock(&thread->wake_lock);
 	xthread->suspend_count--;
 	dtape_hooks->thread_resume(thread->context);
+	libsimple_lock_unlock(&thread->wake_lock);
 };
 
 void thread_wait(thread_t xthread, boolean_t until_not_runnable) {
