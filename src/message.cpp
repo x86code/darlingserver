@@ -24,6 +24,10 @@
 #include <new>
 #include <mutex>
 #include <system_error>
+#include <darlingserver/logging.hpp>
+
+static DarlingServer::Log messageLog("message");
+
 #include <algorithm> // x86Sim
 #include <cstring> // x86Sim
 
@@ -628,6 +632,11 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
 
 		for (size_t i = 0; i < ret; ++i) {
 			messages[i].rawHeader() = mmsgs[i].msg_hdr;
+			if (mmsgs[i].msg_hdr.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) {
+				// body or descriptor set did not fit; dropping it here lets its destructor close the received descriptors
+				messageLog.warning() << "Dropping incoming message that did not fit the receive buffer (flags " << mmsgs[i].msg_hdr.msg_flags << ")" << messageLog.endLog;
+				continue;
+			}
 			messages[i].data().resize(mmsgs[i].msg_len);
 			messages[i].setAddress(Address(*(const struct sockaddr_un*)mmsgs[i].msg_hdr.msg_name, mmsgs[i].msg_hdr.msg_namelen));
 			_messages.push_back(std::move(messages[i]));
