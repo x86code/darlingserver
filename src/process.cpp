@@ -440,9 +440,14 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
 		if (auto parent = _parentProcess.lock()) {
 			// x86Sim: the parent may have died meanwhile; its fork-wait semaphore is then already destroyed (null),
 			// and dtape_semaphore_up(NULL) took darlingserver and the whole container down (seen when a simulator
-			// app's spawner exited while the app was checking in)
-			if (auto sem = parent->_dtapeForkWaitSemaphore)
-				dtape_semaphore_up(sem);
+			// app's spawner exited while the app was checking in). Read it under the parent's lock (notifyDead clears
+			// it under that lock).
+			{
+				std::shared_lock parentLock(parent->_rwlock);
+				if (parent->_dtapeForkWaitSemaphore) {
+					dtape_semaphore_up(parent->_dtapeForkWaitSemaphore);
+				}
+			}
 			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
 		}
 	}
@@ -521,10 +526,13 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
 		throw std::system_error(ESRCH, std::generic_category(), "dead process; can't call memoryInfo");
 	}
 
-	MemoryInfo info;
+	MemoryInfo info {};
 	std::ifstream file("/proc/" + std::to_string(_pid) + "/statm");
 
-	file >> info.virtualSize >> info.residentSize;
+	if (!(file >> info.virtualSize >> info.residentSize)) {
+		// the process died after the check above
+		throw std::system_error(ESRCH, std::generic_category(), "dead process; can't call memoryInfo");
+	}
 
 	info.virtualSize *= sysconf(_SC_PAGESIZE);
 	info.residentSize *= sysconf(_SC_PAGESIZE);
@@ -900,9 +908,14 @@ void DarlingServer::Process::notifyDead() {
 		// (ipc_space_terminate can block, so this needs the microthread context)
 		dtape_task_dying(self->_dtapeTask);
 
-		if (self->_dtapeForkWaitSemaphore) {
-			dtape_semaphore_destroy(self->_dtapeForkWaitSemaphore);
+		dtape_semaphore_t* forkWaitSemaphore = nullptr;
+		{
+			std::unique_lock lock(self->_rwlock);
+			forkWaitSemaphore = self->_dtapeForkWaitSemaphore;
 			self->_dtapeForkWaitSemaphore = nullptr;
+		}
+		if (forkWaitSemaphore) {
+			dtape_semaphore_destroy(forkWaitSemaphore);
 		}
 		dtape_task_release(self->_dtapeTask);
 		self->_dtapeTask = nullptr;
