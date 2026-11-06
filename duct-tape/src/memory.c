@@ -1236,9 +1236,19 @@ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* addres
 		return KERN_INVALID_OBJECT;
 	}
 	dtape_map_shared_descriptor_t* descriptor = entry->dtape_descriptor;
-	uint64_t file_offset = entry->offset + mach_vm_trunc_page(offset);
-	if (offset + initial_size > entry->size + entry->data_offset) {
-		size = mach_vm_round_page(entry->size - mach_vm_trunc_page(offset));
+	// x86Code: the mapping covers the data's offset in its first page too. With VM_FLAGS_RETURN_DATA_ADDR, `offset` is
+	// relative to the entry's data address (entry->data_offset into its first page), as in XNU's vm_map_enter_mem_object;
+	// the size was round_page(initial_size) alone, so data that starts mid-page and crosses a page boundary lost its
+	// last page: WebContent faulted hashing a 0xc4e-byte string at data offset 0x3c8 of an XPC shmem (google.com search box).
+	uint64_t data_offset = offset + ((flags & VM_FLAGS_RETURN_DATA_ADDR) ? entry->data_offset : 0);
+	uint64_t page_offset = mach_vm_trunc_page(data_offset);
+	uint64_t file_offset = entry->offset + page_offset;
+	size = mach_vm_round_page(data_offset - page_offset + initial_size);
+	if (page_offset + size > entry->size) {
+		if (page_offset >= entry->size) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		size = mach_vm_round_page(entry->size - page_offset);
 	}
 
 	int frozen_fd = (copy && size >= 0x40000) ? x86code_frozen_snapshot(descriptor->memfd, file_offset, size) : -1;
@@ -1276,7 +1286,7 @@ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* addres
 
 	*address = addr;
 	if (flags & VM_FLAGS_RETURN_DATA_ADDR) {
-		*address += entry->data_offset + (offset - mach_vm_trunc_page(offset));
+		*address += data_offset - page_offset;
 	}
 	return KERN_SUCCESS;
 };
