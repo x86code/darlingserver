@@ -86,6 +86,10 @@ void dtape_thread_sigexc_exit(dtape_thread_t* thread);
 void dtape_thread_sigexc_enter2(dtape_thread_t* thread);
 void dtape_thread_dying(dtape_thread_t* thread);
 
+/**
+ * Reads and optionally changes the task's uid and gid. Passing -1 as `new_uid` or `new_gid` leaves that id unchanged;
+ * any other value, including other negative ones such as -2 (`nobody`), is stored as the new id.
+ */
 void dtape_task_uidgid(dtape_task_t* task, int new_uid, int new_gid, int* old_uid, int* old_gid);
 void dtape_task_retain(dtape_task_t* task);
 void dtape_task_release(dtape_task_t* task);
