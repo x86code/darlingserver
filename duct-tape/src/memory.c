@@ -806,8 +806,15 @@ kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t*
 	}
 
 	if (parent) {
+		// x86Code (Align 1): as XNU's mach_make_memory_entry_from_parent_entry (osfmk/vm/vm_memory_entry.c): with
+		// MAP_MEM_USE_DATA_ADDR the offset is relative to the parent's data address, i.e. parent->data_offset is added
+		// first (a sub-entry of an entry whose data starts mid-page pointed that many bytes too early: the Safari 1
+		// class of bug), and the bound is the page-rounded end against the parent's size.
+		if (permission & DT_MAP_MEM_USE_DATA_ADDR) {
+			offset += parent->data_offset;
+		}
 		uint64_t start = mach_vm_trunc_page(offset);
-		if (offset + *size > parent->size) {
+		if (mach_vm_round_page(offset + *size) > parent->size || offset + *size < offset) {
 			return KERN_INVALID_ARGUMENT;
 		}
 		descriptor = parent->dtape_descriptor;
@@ -851,7 +858,8 @@ kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t*
 	kr = dtape_named_entry_create(descriptor, entry_offset, entry_size, data_offset, prot, object_handle);
 	dtape_map_shared_descriptor_release(descriptor);
 	if (kr == KERN_SUCCESS) {
-		*size = (permission & DT_MAP_MEM_USE_DATA_ADDR) ? *size : entry_size;
+		// XNU: user_entry->size - user_entry->data_offset (from the data address to the end of its last page)
+		*size = entry_size - data_offset;
 	}
 	return kr;
 };
@@ -1343,7 +1351,13 @@ kern_return_t mach_vm_page_range_query(vm_map_t map, mach_vm_offset_t address, m
 };
 
 kern_return_t mach_vm_protect(vm_map_t map, mach_vm_offset_t start, mach_vm_size_t size, boolean_t set_maximum, vm_prot_t new_protection) {
-	// we ignore `set_maximum`
+	// x86Code (Align 1): XNU's vm_map_protect with set_maximum only lowers (current &= new max) and never grants a
+	// right; this set the current protection to the new maximum (vm_protect(t, a, n, TRUE, VM_PROT_ALL) made a guard
+	// page RWX). There is no maximum on Linux and the current protection of another task isn't known here cheaply:
+	// a maximum that is everything changes nothing, anything else is left as is (the in-process trap does it exactly).
+	if (set_maximum) {
+		return KERN_SUCCESS;
+	}
 
 	int prot = 0;
 
@@ -1369,7 +1383,21 @@ kern_return_t mach_vm_protect(vm_map_t map, mach_vm_offset_t start, mach_vm_size
 };
 
 kern_return_t mach_vm_purgable_control(vm_map_t map, mach_vm_offset_t address, vm_purgable_t control, int* state) {
-	dtape_stub_unsafe();
+	// x86Code (Align 1): the MIG path (another task's map, or the trap's fallback) aborted darlingserver and with it
+	// every process. Same answer as the in-process trap (libsystem_kernel mach_traps.c): nothing is ever purged here.
+	if (!state && control != VM_PURGABLE_PURGE_ALL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	switch (control) {
+		case VM_PURGABLE_SET_STATE:
+		case VM_PURGABLE_GET_STATE:
+			*state = VM_PURGABLE_NONVOLATILE;
+			return KERN_SUCCESS;
+		case VM_PURGABLE_PURGE_ALL:
+			return KERN_SUCCESS;
+		default:
+			return KERN_INVALID_ARGUMENT;
+	}
 };
 
 kern_return_t mach_vm_read_list(vm_map_t map, mach_vm_read_entry_t data_list, natural_t count) {
