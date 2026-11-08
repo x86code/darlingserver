@@ -18,6 +18,7 @@ void dtape_condvar_signal(dtape_condvar_t* condvar, size_t count) {
 		}
 
 		TAILQ_REMOVE(&condvar->queue_head, link, link);
+		link->link.tqe_prev = NULL; // x86Code: dequeued (see dtape_condvar_wait)
 		dtape_thread_t* thread = __container_of(link, dtape_thread_t, mutex_link);
 		dtape_hooks->thread_resume(thread->context);
 
@@ -43,6 +44,18 @@ void dtape_condvar_wait(dtape_condvar_t* condvar, dtape_mutex_t* mutex) {
 	// now let's suspend ourselves to wait;
 	// this also drops the queue lock.
 	dtape_hooks->thread_suspend(thread->context, NULL, NULL, &condvar->queue_lock);
+
+	// x86Code (Input 3): a resume that wasn't our signal (Thread::resume() from elsewhere) returns here with our link
+	// still queued. Callers wait in a loop (thread_wait), and the next wait inserted the queued link again: tqe_next
+	// pointing at itself, and the next dtape_condvar_signal(SIZE_MAX) resumed the same thread for ever, darlingserver at
+	// 100% CPU and every Darling process stalled in its RPCs (an extension's thread_suspend of its own thread, after an
+	// app SIGKILL on the iPad). Take the link out ourselves if no signal did.
+	libsimple_lock_lock(&condvar->queue_lock);
+	if (thread->mutex_link.link.tqe_prev != NULL) {
+		TAILQ_REMOVE(&condvar->queue_head, &thread->mutex_link, link);
+		thread->mutex_link.link.tqe_prev = NULL;
+	}
+	libsimple_lock_unlock(&condvar->queue_lock);
 
 	// we've been awoken; reacquire the mutex
 	dtape_mutex_lock(mutex);
