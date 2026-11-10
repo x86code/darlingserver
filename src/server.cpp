@@ -79,7 +79,7 @@ struct DTapeHooks {
 		return process->_dtapeTask;
 	};
 
-	// x86Code (Speed 32): XNU code calls current_thread() all the time (a third of darlingserver's own CPU per mach_msg
+	// x86Sim (Speed 32): XNU code calls current_thread() all the time (a third of darlingserver's own CPU per mach_msg
 	// went to the shared_ptr copies and the rwlock here). Only the thread itself changes what it impersonates, and the
 	// impersonated thread is kept alive by _impersonating, so the raw pointers are enough.
 	static dtape_thread_t* dtape_hook_current_thread(void) {
@@ -295,7 +295,7 @@ struct DTapeHooks {
 			protection = info.protection;
 			memory_region_info->shared = info.shared;
 			memory_region_info->inode = info.inode;
-			memory_region_info->anon_shared = info.anonShared; // x86Code
+			memory_region_info->anon_shared = info.anonShared; // x86Sim
 		} catch (...) {
 			return false;
 		}
@@ -451,7 +451,7 @@ DarlingServer::Server::Server(std::string prefix):
 	_prefix(prefix),
 	_socketPath(_prefix + "/.darlingserver.sock"),
 	_workQueue(std::bind(&Server::_worker, this, std::placeholders::_1),
-		// x86Code: DSERVER_INLINE=0 brings back the worker thread
+		// x86Sim: DSERVER_INLINE=0 brings back the worker thread
 		Config::singleThreadedWorkQueue && !(getenv("DSERVER_INLINE") && strcmp(getenv("DSERVER_INLINE"), "0") == 0))
 {
 	sharedInstancePointer = this;
@@ -551,7 +551,7 @@ void DarlingServer::Server::start() {
 
 			while (auto msg = _inbox.pop()) {
 				// TODO: this could be done concurrently
-				// x86Code: a message darlingserver can't take (a client's protocol error: unknown call number, PID
+				// x86Sim: a message darlingserver can't take (a client's protocol error: unknown call number, PID
 				// mismatch, ...) costs that message, not every process (willi/darlingserver#7 does this per error class)
 				std::shared_ptr<DarlingServer::Call> call;
 				try {
@@ -562,12 +562,12 @@ void DarlingServer::Server::start() {
 					continue;
 				}
 				if (call) {
-					scheduleThread(call->thread()); // x86Code: once at most (willi/darlingserver#13)
+					scheduleThread(call->thread()); // x86Sim: once at most (willi/darlingserver#13)
 				}
 			}
 		}
 
-		// x86Code: inline mode: run the microthreads the messages (and the last wakeup's timers and monitors) made
+		// x86Sim: inline mode: run the microthreads the messages (and the last wakeup's timers and monitors) made
 		// runnable, here on the epoll thread. Their replies leave from here directly (sendMessage).
 		if (_workQueue.isInline()) {
 			_workQueue.drain();
@@ -581,7 +581,7 @@ void DarlingServer::Server::start() {
 			}
 		}
 
-		// x86Code: reset and re-arm the eventfd only when it fired or what it should be armed with changed: before, every
+		// x86Sim: reset and re-arm the eventfd only when it fired or what it should be armed with changed: before, every
 		// loop iteration (every RPC) made an eventfd read and an epoll_ctl even though nothing had written it
 		uint32_t wantWakeup = (_canWrite) ? (EPOLLIN | EPOLLONESHOT) : 0;
 		if (_wakeupFired || wantWakeup != _wakeupEvents) {
@@ -729,7 +729,7 @@ void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
 	thread->doWork();
 };
 
-// x86Code (willi/darlingserver#13): a thread is on the work queue once at most, as XNU's thread_setrun() puts a thread
+// x86Sim (willi/darlingserver#13): a thread is on the work queue once at most, as XNU's thread_setrun() puts a thread
 // on one run queue only. A second entry ran doWork() once too often, and one that found the thread suspended in a wait
 // resumed it with no wakeup: an S2C caller's reply wait then returned "interrupted", and the reply that came later was
 // the next call's "duplicate S2C reply".

@@ -22,7 +22,7 @@ struct zone {
 struct kalloc_heap KHEAP_DEFAULT[1];
 // stub
 struct kalloc_heap KHEAP_DATA_BUFFERS[1];
-// stub (x86Code: used by host_create_mach_voucher_trap)
+// stub (x86Sim: used by host_create_mach_voucher_trap)
 struct kalloc_heap KHEAP_TEMP[1];
 
 // stub
@@ -38,22 +38,22 @@ long sysconf(int name);
 int memfd_create(const char *name, unsigned int flags);
 
 int close(int fd);
-int dup(int fd); // x86Code: dtape_memfd_for_region
+int dup(int fd); // x86Sim: dtape_memfd_for_region
 int ftruncate(int fd, off_t length);
-int fstat(int fd, void* buf); // x86Code: x86_64 struct stat, only st_ino is read
+int fstat(int fd, void* buf); // x86Sim: x86_64 struct stat, only st_ino is read
 
-// x86Code: all shared descriptors, to look them up by inode
-// x86Code: hashed by inode (see dtape_map_shared_descriptor_find_inode)
+// x86Sim: all shared descriptors, to look them up by inode
+// x86Sim: hashed by inode (see dtape_map_shared_descriptor_find_inode)
 #define DTAPE_DESC_BUCKETS 1024
 static dtape_map_shared_descriptor_t* all_descriptors[DTAPE_DESC_BUCKETS];
 #define DTAPE_DESC_BUCKET(inode) (&all_descriptors[((inode) * 0x9E3779B97F4A7C15ull) >> 54])
 static dtape_mutex_t all_descriptors_lock;
-// x86Code: frozen snapshots for copy=TRUE vm_maps of large memory entries (see mach_vm_map_external)
+// x86Sim: frozen snapshots for copy=TRUE vm_maps of large memory entries (see mach_vm_map_external)
 static dtape_mutex_t frozen_lock;
-static struct { int fd; uint64_t size, fp, used; } x86code_frozen[8];
-static uint64_t x86code_frozen_clock;
-static int x86code_frozen_fd(const uint8_t* src, uint64_t size);
-static bool x86code_frozen_enabled(void);
+static struct { int fd; uint64_t size, fp, used; } x86sim_frozen[8];
+static uint64_t x86sim_frozen_clock;
+static int x86sim_frozen_fd(const uint8_t* src, uint64_t size);
+static bool x86sim_frozen_enabled(void);
 
 #define MAP_ANONYMOUS 0x20
 #define MAP_SHARED 0x01
@@ -128,7 +128,7 @@ static dtape_map_shared_descriptor_t* dtape_map_shared_descriptor_create(int mem
 	desc->memfd = memfd;
 	desc->size = size;
 
-	// x86Code: register by inode (x86_64 glibc struct stat: st_ino at offset 8)
+	// x86Sim: register by inode (x86_64 glibc struct stat: st_ino at offset 8)
 	uint64_t st[18];
 	desc->inode = fstat(memfd, st) == 0 ? st[1] : 0;
 	dtape_mutex_lock(&all_descriptors_lock);
@@ -144,7 +144,7 @@ static dtape_map_shared_descriptor_t* dtape_map_shared_descriptor_create(int mem
 	return desc;
 };
 
-// x86Code: the descriptor whose memfd has this inode (retained), if any
+// x86Sim: the descriptor whose memfd has this inode (retained), if any
 static dtape_map_shared_descriptor_t* dtape_map_shared_descriptor_find_inode(uint64_t inode) {
 	dtape_map_shared_descriptor_t* found = NULL;
 	if (inode == 0) {
@@ -210,7 +210,7 @@ static void dtape_map_insert_shared_entry_locked(dtape_map_t* map, dtape_map_sha
 	RB_INSERT(dtape_map_shared_entry_head, &map->shared_entries, shared_entry);
 };
 
-// x86Code: the first entry that may overlap a range starting at `address` (no entry starting before
+// x86Sim: the first entry that may overlap a range starting at `address` (no entry starting before
 // address - max_entry_size reaches it); walk on with RB_NEXT while entry->address < end
 static dtape_map_shared_entry_t* dtape_map_first_overlap_candidate(dtape_map_t* map, uint64_t address) {
 	dtape_map_shared_entry_t key;
@@ -218,7 +218,7 @@ static dtape_map_shared_entry_t* dtape_map_first_overlap_candidate(dtape_map_t* 
 	return RB_NFIND(dtape_map_shared_entry_head, &map->shared_entries, &key);
 };
 
-// x86Code: like RB_FOREACH_SAFE, over the entries that may overlap [start, start + size) only
+// x86Sim: like RB_FOREACH_SAFE, over the entries that may overlap [start, start + size) only
 #define DTAPE_FOREACH_OVERLAP_SAFE(entry, tmp, map, start, size) \
 	for ((entry) = dtape_map_first_overlap_candidate((map), (start)); \
 		(entry) && (entry)->address < (start) + (size) && \
@@ -247,7 +247,7 @@ static size_t dtape_map_find_shared_entries_locked(dtape_map_t* map, uint64_t ad
 	}
 
 	DTAPE_FOREACH_OVERLAP_SAFE(entry, tmp, map, address, size) {
-		// x86Code: half-open ranges; an entry that merely touches the region does not intersect it
+		// x86Sim: half-open ranges; an entry that merely touches the region does not intersect it
 		// (it counted, so a memory entry next to a shared region failed as "partially shared")
 		if (entry->address + entry->size <= address || entry->address >= address + size) {
 			continue;
@@ -263,7 +263,7 @@ static size_t dtape_map_find_shared_entries_locked(dtape_map_t* map, uint64_t ad
 	return count;
 };
 
-// x86Code: the process doesn't tell us when it unmaps a shared entry that we remapped, and entries used to be dropped
+// x86Sim: the process doesn't tell us when it unmaps a shared entry that we remapped, and entries used to be dropped
 // only when the process died: every memfd a long-lived process ever shared stayed alive in darlingserver after the
 // process freed the memory. After a 10 min boot darlingserver held 1,827 memfds (1.03 GB of shmem), 1,202 of them
 // (0.9 GB, mostly IOSurface-sized: 12 MB full-screen buffers, 5-8 MB layers) mapped by no process at all.
@@ -517,14 +517,14 @@ kern_return_t vm_map_copyin_common(vm_map_t src_map, vm_map_address_t src_addr, 
 
 	kern_return_t kr;
 
-	// x86Code: a large copy from a task (lsd sends its 8 MB LaunchServices store to every client this way) goes into a
+	// x86Sim: a large copy from a task (lsd sends its 8 MB LaunchServices store to every client this way) goes into a
 	// frozen memfd, deduplicated by contents, that the receiver maps MAP_PRIVATE (copy-on-write): receivers share pages.
-	if (len >= 0x100000 && src_map != kernel_map && x86code_frozen_enabled()) {
+	if (len >= 0x100000 && src_map != kernel_map && x86sim_frozen_enabled()) {
 		void* buf = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		if (buf != MAP_FAILED) {
 			int fd = -1;
 			if (copyinmap(src_map, src_addr, buf, (vm_size_t)len) == KERN_SUCCESS) {
-				fd = x86code_frozen_fd(buf, len);
+				fd = x86sim_frozen_fd(buf, len);
 			}
 			munmap(buf, len);
 			vm_map_copy_t copy = (fd >= 0) ? malloc(sizeof(struct vm_map_copy)) : NULL;
@@ -571,9 +571,9 @@ kern_return_t vm_map_copyin_common(vm_map_t src_map, vm_map_address_t src_addr, 
 	return KERN_SUCCESS;
 };
 
-// x86Code: copyout of a frozen-memfd copy: a MAP_PRIVATE mapping of the memfd at a new address, or over a page-aligned
+// x86Sim: copyout of a frozen-memfd copy: a MAP_PRIVATE mapping of the memfd at a new address, or over a page-aligned
 // range of private anonymous memory (vm_copy/overwrite); anything else gets the bytes written as before.
-static kern_return_t x86code_copyout_frozen(vm_map_t map, vm_map_address_t* addr, vm_map_copy_t copy, vm_map_size_t copy_size, boolean_t overwrite) {
+static kern_return_t x86sim_copyout_frozen(vm_map_t map, vm_map_address_t* addr, vm_map_copy_t copy, vm_map_size_t copy_size, boolean_t overwrite) {
 	int fd = copy->dtape_frozen_fd;
 	size_t pages = dtape_byte_count_to_page_count_round_up(copy_size);
 	size_t rounded = (copy_size + 0xfff) & ~0xfffull;
@@ -617,7 +617,7 @@ static kern_return_t vm_map_copyout_kernel_buffer(vm_map_t map, vm_map_address_t
 	kern_return_t kr = KERN_SUCCESS;
 
 	if (copy->dtape_frozen_fd >= 0) {
-		kr = x86code_copyout_frozen(map, addr, copy, copy_size, overwrite);
+		kr = x86sim_copyout_frozen(map, addr, copy, copy_size, overwrite);
 		if (kr == KERN_SUCCESS && consume_on_success) {
 			close(copy->dtape_frozen_fd);
 			free(copy);
@@ -728,7 +728,7 @@ kern_return_t mach_vm_allocate_kernel(vm_map_t map, mach_vm_offset_t* addr, mach
 };
 
 /*
- * x86Code: Mach memory entries backed by memfds (shared memory between processes).
+ * x86Sim: Mach memory entries backed by memfds (shared memory between processes).
  *
  * A named entry holds a dtape_map_shared_descriptor (the memfd) plus an offset/size
  * into it. MAP_MEM_NAMED_CREATE makes a fresh memfd; an entry for an existing range
@@ -740,7 +740,7 @@ kern_return_t mach_vm_allocate_kernel(vm_map_t map, mach_vm_offset_t* addr, mach
 #define DT_MAP_MEM_NAMED_CREATE  0x020000
 #define DT_MAP_MEM_USE_DATA_ADDR 0x100000
 
-// x86Code: whether [start, start + size) of the task holds the same bytes as the descriptor's memfd at byte_offset
+// x86Sim: whether [start, start + size) of the task holds the same bytes as the descriptor's memfd at byte_offset
 static bool dtape_region_matches_descriptor(vm_map_t map, uintptr_t start, size_t size, dtape_map_shared_descriptor_t* descriptor, uint64_t byte_offset) {
 	static __thread char* buf;
 	const size_t chunk = 256 * 1024;
@@ -806,7 +806,7 @@ kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t*
 	}
 
 	if (parent) {
-		// x86Code (Align 1): as XNU's mach_make_memory_entry_from_parent_entry (osfmk/vm/vm_memory_entry.c): with
+		// x86Sim (Align 1): as XNU's mach_make_memory_entry_from_parent_entry (osfmk/vm/vm_memory_entry.c): with
 		// MAP_MEM_USE_DATA_ADDR the offset is relative to the parent's data address, i.e. parent->data_offset is added
 		// first (a sub-entry of an entry whose data starts mid-page pointed that many bytes too early: the Safari 1
 		// class of bug), and the bound is the page-rounded end against the parent's size.
@@ -864,15 +864,15 @@ kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t*
 	return kr;
 };
 
-// x86Code: these three were unsafe stubs that aborted darlingserver (and so every process); WebKit's WebContent process
+// x86Sim: these three were unsafe stubs that aborted darlingserver (and so every process); WebKit's WebContent process
 // calls mach_memory_entry_ownership() for its shared memory (WebCore SharedMemory::setOwnershipOfMemory()).
-static bool x86code_is_named_entry(ipc_port_t entry_port) {
+static bool x86sim_is_named_entry(ipc_port_t entry_port) {
 	return IP_VALID(entry_port) && ip_kotype(entry_port) == IKOT_NAMED_ENTRY;
 };
 
 kern_return_t mach_memory_entry_access_tracking(ipc_port_t entry_port, int* access_tracking, uint32_t* access_tracking_reads, uint32_t* access_tracking_writes) {
 	// as XNU built without VM_OBJECT_ACCESS_TRACKING (release kernels)
-	if (!x86code_is_named_entry(entry_port)) {
+	if (!x86sim_is_named_entry(entry_port)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 	return KERN_NOT_SUPPORTED;
@@ -881,7 +881,7 @@ kern_return_t mach_memory_entry_access_tracking(ipc_port_t entry_port, int* acce
 kern_return_t mach_memory_entry_ownership(ipc_port_t entry_port, task_t owner, int ledger_tag, int ledger_flags) {
 	// XNU moves the object's pages to `owner`'s ledger (footprint accounting). There are no ledgers here: validate as
 	// XNU does and succeed.
-	if (!x86code_is_named_entry(entry_port)) {
+	if (!x86sim_is_named_entry(entry_port)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 	if (ledger_tag != VM_LEDGER_TAG_NONE && (ledger_tag < 0 || ledger_tag > VM_LEDGER_TAG_MAX)) {
@@ -892,7 +892,7 @@ kern_return_t mach_memory_entry_ownership(ipc_port_t entry_port, task_t owner, i
 
 kern_return_t mach_memory_entry_purgable_control(ipc_port_t entry_port, vm_purgable_t control, int* state) {
 	// nothing is ever purged here: an entry behaves as purgable memory the system never emptied (nonvolatile)
-	if (!x86code_is_named_entry(entry_port) || !state) {
+	if (!x86sim_is_named_entry(entry_port) || !state) {
 		return KERN_INVALID_ARGUMENT;
 	}
 	if (control != VM_PURGABLE_SET_STATE && control != VM_PURGABLE_GET_STATE && control != VM_PURGABLE_SET_STATE_FROM_KERNEL) {
@@ -950,7 +950,7 @@ kern_return_t mach_vm_machine_attribute(vm_map_t map, mach_vm_address_t addr, ma
 	dtape_stub_unsafe();
 };
 
-// x86Code: make [start, start + size) of `map` a shared mapping of a memfd (or find
+// x86Sim: make [start, start + size) of `map` a shared mapping of a memfd (or find
 // the one it already is) and return it with the byte offset of `start` in it
 static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t size, dtape_map_shared_descriptor_t** out_descriptor, uint64_t* out_byte_offset, vm_prot_t* out_prot) {
 	dtape_memory_region_info_t region_info;
@@ -970,7 +970,7 @@ static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t si
 	dtape_map_prune_shared_entries(map);
 	dtape_mutex_lock(&map->shared_entry_lock);
 	count = dtape_map_find_shared_entries_locked(map, start, size, existing, sizeof(existing) / sizeof(*existing));
-	// x86Code: entries are not dropped on munmap, so an entry may describe memory the process no longer maps
+	// x86Sim: entries are not dropped on munmap, so an entry may describe memory the process no longer maps
 	// (free()+malloc() reused the address): the old memfd's stale contents were handed out again. libxpc
 	// sends xpc_data >16 KB as memory entries, so receivers got the previous message's bytes (NSXPC NSData of
 	// 16-32 KB; SpringBoard crashed on a nil CHSWidgetExtensionsBox). /proc/<pid>/maps is the truth: a
@@ -1002,7 +1002,7 @@ static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t si
 		}
 	}
 	if (region_info.shared && count != 0) {
-		// x86Code: a MAP_SHARED mapping that is none of our memfds (a file mapping): any entry here is
+		// x86Sim: a MAP_SHARED mapping that is none of our memfds (a file mapping): any entry here is
 		// stale (the address was unmapped and reused by another mapping since). iconservicesagent mmaps each
 		// icon's .isdata cache file, xpc_shmem_create_readonly()s it and unmaps it, so every icon landed at
 		// the same address and SpringBoard got the first icon's bytes for all of them (gray icons). Hand out a
@@ -1019,10 +1019,10 @@ static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t si
 		count = 0;
 	}
 	if (region_info.shared && !region_info.anon_shared) {
-		// x86Code: and never replace a file mapping by a memfd (writes would no longer reach the file)
+		// x86Sim: and never replace a file mapping by a memfd (writes would no longer reach the file)
 		snapshot = true;
 	}
-	// x86Code: anonymous shared memory (mmap MAP_SHARED|MAP_ANON) is not a file: it is moved into a memfd like
+	// x86Sim: anonymous shared memory (mmap MAP_SHARED|MAP_ANON) is not a file: it is moved into a memfd like
 	// private memory below, so the receiver shares it. With a snapshot, the Metal simulator transport broke: MTLSimDriver
 	// allocates every MTLBuffer that way and hands it to the service with xpc_shmem_create, and neither side saw the
 	// other's later writes (GPU results never reached the app).
@@ -1045,7 +1045,7 @@ static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t si
 		return KERN_SUCCESS;
 	}
 	if (count != 0) {
-		// x86Code: the region is partly shared already, or overlaps entries of mappings that
+		// x86Sim: the region is partly shared already, or overlaps entries of mappings that
 		// were unmapped since (entries are only dropped when the task dies) and whose addresses
 		// got reused. Forget those entries and share the region afresh below: the process keeps
 		// its pages (copied into the new memfd), only sharing with earlier memory entries of the
@@ -1107,7 +1107,7 @@ static kern_return_t dtape_share_region(vm_map_t map, uintptr_t start, size_t si
 	return kr;
 };
 
-// x86Code: the memfd behind [address, address + size) of the current task, making the range a shared mapping of
+// x86Sim: the memfd behind [address, address + size) of the current task, making the range a shared mapping of
 // one first if it isn't (as mach_make_memory_entry does). For Darling processes that hand their memory to a native
 // Linux process without copying: spike3/metal's metalhostd passes MTLBuffer pages (xpc_shmem from the app, already
 // one of our memfds) to mtlvk, which imports them into Vulkan. *out_offset is the byte offset of `address` in the
@@ -1136,21 +1136,21 @@ int dtape_memfd_for_region(uint64_t address, uint64_t size, int* out_fd, uint64_
 	return 0;
 };
 
-// x86Code: a copy=TRUE vm_map of a large memory entry (lsd's 8 MB LaunchServices store, mapped by every LS client, a new
+// x86Sim: a copy=TRUE vm_map of a large memory entry (lsd's 8 MB LaunchServices store, mapped by every LS client, a new
 // entry per send) used to write a private copy into each receiver. Instead the bytes go into a frozen memfd that nobody
 // ever maps shared or writes, and the receiver maps it MAP_PRIVATE: same snapshot semantics (its own writes stay
 // private), but receivers of the same contents share the pages. Snapshots are found by size + a sampled fingerprint and
 // verified with a full memcmp; the last 8 are kept. Returns a dup'd fd of the snapshot, or -1 (then: copy as before).
-static bool x86code_frozen_enabled(void) {
+static bool x86sim_frozen_enabled(void) {
 	static int enabled = -1;
 	if (enabled < 0) {
-		const char* e = getenv("X86CODE_FROZEN_SNAPSHOTS");
+		const char* e = getenv("X86SIM_FROZEN_SNAPSHOTS");
 		enabled = !(e && *e == '0');
 	}
 	return enabled;
 };
 // A dup'd fd of a frozen memfd holding these `size` bytes (an existing one with the same contents, or a new one), or -1.
-static int x86code_frozen_fd(const uint8_t* src, uint64_t size) {
+static int x86sim_frozen_fd(const uint8_t* src, uint64_t size) {
 	uint64_t fp = size * 0x9e3779b97f4a7c15ull;
 	for (uint64_t k = 0; k < 256; k++) {
 		uint64_t w;
@@ -1161,17 +1161,17 @@ static int x86code_frozen_fd(const uint8_t* src, uint64_t size) {
 	dtape_mutex_lock(&frozen_lock);
 	int victim = 0;
 	for (int i = 0; i < 8 && result < 0; i++) {
-		if (x86code_frozen[i].used < x86code_frozen[victim].used) {
+		if (x86sim_frozen[i].used < x86sim_frozen[victim].used) {
 			victim = i;
 		}
-		if (!x86code_frozen[i].used || x86code_frozen[i].size != size || x86code_frozen[i].fp != fp) {
+		if (!x86sim_frozen[i].used || x86sim_frozen[i].size != size || x86sim_frozen[i].fp != fp) {
 			continue;
 		}
-		const void* snap = mmap(NULL, size, PROT_READ, MAP_SHARED, x86code_frozen[i].fd, 0);
+		const void* snap = mmap(NULL, size, PROT_READ, MAP_SHARED, x86sim_frozen[i].fd, 0);
 		if (snap != MAP_FAILED) {
 			if (memcmp(snap, src, size) == 0) {
-				x86code_frozen[i].used = ++x86code_frozen_clock;
-				result = dup(x86code_frozen[i].fd);
+				x86sim_frozen[i].used = ++x86sim_frozen_clock;
+				result = dup(x86sim_frozen[i].fd);
 			}
 			munmap((void*)snap, size);
 		}
@@ -1186,13 +1186,13 @@ static int x86code_frozen_fd(const uint8_t* src, uint64_t size) {
 		if (dst != MAP_FAILED) {
 			memcpy(dst, src, size);
 			munmap(dst, rounded);
-			if (x86code_frozen[victim].used) {
-				close(x86code_frozen[victim].fd);
+			if (x86sim_frozen[victim].used) {
+				close(x86sim_frozen[victim].fd);
 			}
-			x86code_frozen[victim].fd = fd;
-			x86code_frozen[victim].size = size;
-			x86code_frozen[victim].fp = fp;
-			x86code_frozen[victim].used = ++x86code_frozen_clock;
+			x86sim_frozen[victim].fd = fd;
+			x86sim_frozen[victim].size = size;
+			x86sim_frozen[victim].fp = fp;
+			x86sim_frozen[victim].used = ++x86sim_frozen_clock;
 			result = dup(fd);
 		} else if (fd >= 0) {
 			close(fd);
@@ -1201,21 +1201,21 @@ static int x86code_frozen_fd(const uint8_t* src, uint64_t size) {
 	dtape_mutex_unlock(&frozen_lock);
 	return result;
 };
-static int x86code_frozen_snapshot(int memfd, uint64_t offset, uint64_t size) {
-	if (!x86code_frozen_enabled()) {
+static int x86sim_frozen_snapshot(int memfd, uint64_t offset, uint64_t size) {
+	if (!x86sim_frozen_enabled()) {
 		return -1;
 	}
 	const uint8_t* src = mmap(NULL, size, PROT_READ, MAP_SHARED, memfd, offset);
 	if (src == MAP_FAILED) {
 		return -1;
 	}
-	int result = x86code_frozen_fd(src, size);
+	int result = x86sim_frozen_fd(src, size);
 	munmap((void*)src, size);
 	return result;
 };
 
 kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* address, mach_vm_size_t initial_size, mach_vm_offset_t mask, int flags, ipc_port_t port, vm_object_offset_t offset, boolean_t copy, vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance) {
-	// x86Code: was a stub that returned success without mapping anything
+	// x86Sim: was a stub that returned success without mapping anything
 	int prot = 0;
 	dtape_memory_flags_t memflags = 0;
 	uintptr_t hint = (flags & VM_FLAGS_ANYWHERE) ? 0 : *address;
@@ -1244,7 +1244,7 @@ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* addres
 		return KERN_INVALID_OBJECT;
 	}
 	dtape_map_shared_descriptor_t* descriptor = entry->dtape_descriptor;
-	// x86Code: the mapping covers the data's offset in its first page too. With VM_FLAGS_RETURN_DATA_ADDR, `offset` is
+	// x86Sim: the mapping covers the data's offset in its first page too. With VM_FLAGS_RETURN_DATA_ADDR, `offset` is
 	// relative to the entry's data address (entry->data_offset into its first page), as in XNU's vm_map_enter_mem_object;
 	// the size was round_page(initial_size) alone, so data that starts mid-page and crosses a page boundary lost its
 	// last page: WebContent faulted hashing a 0xc4e-byte string at data offset 0x3c8 of an XPC shmem (google.com search box).
@@ -1259,7 +1259,7 @@ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* addres
 		size = mach_vm_round_page(entry->size - page_offset);
 	}
 
-	int frozen_fd = (copy && size >= 0x40000) ? x86code_frozen_snapshot(descriptor->memfd, file_offset, size) : -1;
+	int frozen_fd = (copy && size >= 0x40000) ? x86sim_frozen_snapshot(descriptor->memfd, file_offset, size) : -1;
 	if (frozen_fd >= 0) {
 		addr = dtape_hooks->task_map_file(target_map->dtape_task->context, frozen_fd, dtape_byte_count_to_page_count_round_up(size), prot, hint, 0, memflags | dtape_memory_flag_private);
 		close(frozen_fd);
@@ -1328,13 +1328,13 @@ kern_return_t mach_vm_page_info(vm_map_t map, mach_vm_address_t address, vm_page
 };
 
 kern_return_t mach_vm_page_query(vm_map_t map, mach_vm_offset_t offset, int* disposition, int* ref_count) {
-	// x86Code: as mach_vm_page_range_query: resident (debuggers ask; the unsafe stub aborted darlingserver)
+	// x86Sim: as mach_vm_page_range_query: resident (debuggers ask; the unsafe stub aborted darlingserver)
 	*disposition = 0x1; // VM_PAGE_QUERY_PAGE_PRESENT
 	*ref_count = 1;
 	return KERN_SUCCESS;
 };
 
-// x86Code: debugserver (LLDB's qMemoryRegionInfo dirty-pages) calls this for every region; the unsafe stub aborted
+// x86Sim: debugserver (LLDB's qMemoryRegionInfo dirty-pages) calls this for every region; the unsafe stub aborted
 // darlingserver and with it the whole container. Linux doesn't tell us per-page residency of another process cheaply,
 // so every page is reported present (VM_PAGE_QUERY_PAGE_PRESENT), which is what a resident, non-purgeable mapping is.
 kern_return_t mach_vm_page_range_query(vm_map_t map, mach_vm_offset_t address, mach_vm_size_t size, mach_vm_address_t dispositions_addr, mach_vm_size_t* dispositions_count) {
@@ -1351,7 +1351,7 @@ kern_return_t mach_vm_page_range_query(vm_map_t map, mach_vm_offset_t address, m
 };
 
 kern_return_t mach_vm_protect(vm_map_t map, mach_vm_offset_t start, mach_vm_size_t size, boolean_t set_maximum, vm_prot_t new_protection) {
-	// x86Code (Align 1): XNU's vm_map_protect with set_maximum only lowers (current &= new max) and never grants a
+	// x86Sim (Align 1): XNU's vm_map_protect with set_maximum only lowers (current &= new max) and never grants a
 	// right; this set the current protection to the new maximum (vm_protect(t, a, n, TRUE, VM_PROT_ALL) made a guard
 	// page RWX). There is no maximum on Linux and the current protection of another task isn't known here cheaply:
 	// a maximum that is everything changes nothing, anything else is left as is (the in-process trap does it exactly).
@@ -1383,7 +1383,7 @@ kern_return_t mach_vm_protect(vm_map_t map, mach_vm_offset_t start, mach_vm_size
 };
 
 kern_return_t mach_vm_purgable_control(vm_map_t map, mach_vm_offset_t address, vm_purgable_t control, int* state) {
-	// x86Code (Align 1): the MIG path (another task's map, or the trap's fallback) aborted darlingserver and with it
+	// x86Sim (Align 1): the MIG path (another task's map, or the trap's fallback) aborted darlingserver and with it
 	// every process. Same answer as the in-process trap (libsystem_kernel mach_traps.c): nothing is ever purged here.
 	if (!state && control != VM_PURGABLE_PURGE_ALL) {
 		return KERN_INVALID_ARGUMENT;
@@ -1404,7 +1404,7 @@ kern_return_t mach_vm_read_list(vm_map_t map, mach_vm_read_entry_t data_list, na
 	dtape_stub_unsafe();
 };
 
-// x86Code: mach_vm_region/mach_vm_region_recurse for all of XNU's flavors (they used to abort the whole server for
+// x86Sim: mach_vm_region/mach_vm_region_recurse for all of XNU's flavors (they used to abort the whole server for
 // anything but BASIC_INFO(_64) and the short submap info). Everything comes from /proc/<pid>/maps of the target
 // process (via the task_get_memory_region_info/task_get_next_region hooks); object/page statistics are not available
 // and are approximated (pages_resident = region size, ref_count 1, no submaps).
@@ -1599,13 +1599,13 @@ kern_return_t mach_vm_region_recurse(vm_map_t map, mach_vm_address_t* address, m
 	return KERN_SUCCESS;
 };
 
-// x86Code: shared (copy = FALSE) remap, rewritten on dtape_share_region. The original ignored the target address
+// x86Sim: shared (copy = FALSE) remap, rewritten on dtape_share_region. The original ignored the target address
 // and flags (it always mapped anywhere and returned that address) and aborted ("Cannot complexly remap existing
 // shared regions yet") when the source was partly shared already. SwiftUI's AttributeGraph grows its arena with
 // mmap(4x size) + vm_remap(&new, old size, VM_FLAGS_OVERWRITE, old) and keeps using `new` as the base: the old
 // pages landed elsewhere, the new region's head was unmapped, and every app with SwiftUI (Settings search) crashed
 // in AG::data::table::alloc_page on the second grow. Now the target honours VM_FLAGS_ANYWHERE/FIXED/OVERWRITE.
-static void x86code_replace_target_entry(vm_map_t target_map, uintptr_t addr, size_t size, uint64_t page_offset, dtape_map_shared_descriptor_t* descriptor) {
+static void x86sim_replace_target_entry(vm_map_t target_map, uintptr_t addr, size_t size, uint64_t page_offset, dtape_map_shared_descriptor_t* descriptor) {
 	dtape_map_shared_entry_t* target_shared_entry = dtape_map_shared_entry_create(addr, size, page_offset, descriptor);
 	if (!target_shared_entry) {
 		return;
@@ -1683,7 +1683,7 @@ static kern_return_t mach_vm_remap_external_shared_pieces(vm_map_t target_map, m
 		if (!base) {
 			base = got;
 		}
-		x86code_replace_target_entry(target_map, got, piece, byte_offset >> target_map->dtape_page_shift, descriptor);
+		x86sim_replace_target_entry(target_map, got, piece, byte_offset >> target_map->dtape_page_shift, descriptor);
 		dtape_map_shared_descriptor_release(descriptor);
 		at = piece_end;
 	}
@@ -1692,7 +1692,7 @@ static kern_return_t mach_vm_remap_external_shared_pieces(vm_map_t target_map, m
 		static int logged = 0;
 		if (logged < 64) {
 			logged++;
-			dtape_log_error("x86code: piecewise shared remap %#lx+%#lx -> %#lx (pid %d)", (unsigned long)start_memaddr, (unsigned long)map_size, (unsigned long)base, src_map->dtape_task ? (int)src_map->dtape_task->saved_pid : -1);
+			dtape_log_error("x86sim: piecewise shared remap %#lx+%#lx -> %#lx (pid %d)", (unsigned long)start_memaddr, (unsigned long)map_size, (unsigned long)base, src_map->dtape_task ? (int)src_map->dtape_task->saved_pid : -1);
 		}
 	}
 	*max_protection = VM_PROT_ALL;
@@ -1713,7 +1713,7 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
 	vm_prot_t vm_prot = VM_PROT_NONE;
 	int prot = 0;
 
-	// x86Code (Speed 36): a source made of several mappings (AttributeGraph's second growth: the first growth's
+	// x86Sim (Speed 36): a source made of several mappings (AttributeGraph's second growth: the first growth's
 	// destination is the old table's memfd followed by fresh anonymous pages) is remapped piece by piece, each piece
 	// shared as it is: memfd pieces keep their memfd, so every earlier alias (the old table, still used through
 	// pointers computed before a rule ran) keeps sharing pages with the new range, as on XNU.
@@ -1750,7 +1750,7 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
 
 	dtape_map_shared_entry_t* target_shared_entry = dtape_map_shared_entry_create(target_addr, map_size, byte_offset >> target_map->dtape_page_shift, descriptor);
 	if (target_shared_entry) {
-		// x86Code: a remap over the target's own range replaces whatever entries described it
+		// x86Sim: a remap over the target's own range replaces whatever entries described it
 		dtape_mutex_lock(&target_map->shared_entry_lock);
 		dtape_map_shared_entry_t* entry;
 		dtape_map_shared_entry_t* tmp;
@@ -1946,12 +1946,12 @@ kern_return_t vm_map_purgable_control(vm_map_t map, vm_map_offset_t address, vm_
 };
 
 kern_return_t vm_map_region(vm_map_t map, vm_map_offset_t* address, vm_map_size_t* size, vm_region_flavor_t flavor, vm_region_info_t info, mach_msg_type_number_t* count, mach_port_t* object_name) {
-	// x86Code: vm_region/vm_region_64 MIG routines (were an abort)
+	// x86Sim: vm_region/vm_region_64 MIG routines (were an abort)
 	return mach_vm_region(map, address, size, flavor, info, count, object_name);
 };
 
 kern_return_t vm_map_region_recurse_64(vm_map_t map, vm_map_offset_t* address, vm_map_size_t* size, natural_t* nesting_depth, vm_region_submap_info_64_t submap_info, mach_msg_type_number_t* count) {
-	// x86Code: vm_region_recurse(_64) MIG routines (were an abort)
+	// x86Sim: vm_region_recurse(_64) MIG routines (were an abort)
 	return mach_vm_region_recurse(map, address, size, nesting_depth, (vm_region_recurse_info_t)submap_info, count);
 };
 
@@ -2248,7 +2248,7 @@ mach_destroy_memory_entry(
 
 	if (named_entry->ref_count == 0) {
 		if (named_entry->dtape_descriptor) {
-			// x86Code: memfd-backed entry
+			// x86Sim: memfd-backed entry
 			dtape_map_shared_descriptor_release(named_entry->dtape_descriptor);
 			named_entry->dtape_descriptor = NULL;
 		} else if (named_entry->is_sub_map) {

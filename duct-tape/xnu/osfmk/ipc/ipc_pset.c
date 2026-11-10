@@ -519,7 +519,7 @@ filt_machport_turnstile_prepare_lazily(
 {
 #ifdef __DARLING__
 	/*
-	 * x86Code: Darling's kqchan knotes are not in a kqueue (so not suppressed/locked)
+	 * x86Sim: Darling's kqchan knotes are not in a kqueue (so not suppressed/locked)
 	 * and have no turnstile; this only sets up priority inheritance for a port
 	 * received with the event (e.g. a receive right in an XPC check-in). Skip it.
 	 */
@@ -1149,7 +1149,7 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 
 #ifdef __DARLING__
 	/*
-	 * x86Code: receiving a complex message here (out-of-line memory, port rights) makes
+	 * x86Sim: receiving a complex message here (out-of-line memory, port rights) makes
 	 * the copyout map memory in the receiver through an S2C call from a kqchan
 	 * microthread, which can deadlock darlingserver. Report MACH_RCV_TOO_LARGE instead
 	 * (the message stays queued, its size and the port name go in the event) and let

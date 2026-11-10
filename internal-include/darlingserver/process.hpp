@@ -81,8 +81,8 @@ namespace DarlingServer {
 			int protection;
 			uint64_t mapOffset;
 			bool shared;
-			uint64_t inode; // x86Code
-			bool anonShared; // x86Code: MAP_SHARED|MAP_ANON (shmem, "/dev/zero (deleted)" in maps)
+			uint64_t inode; // x86Sim
+			bool anonShared; // x86Sim: MAP_SHARED|MAP_ANON (shmem, "/dev/zero (deleted)" in maps)
 		};
 
 	private:
@@ -97,7 +97,7 @@ namespace DarlingServer {
 		dtape_task_t* _dtapeTask;
 		std::weak_ptr<Process> _parentProcess;
 		bool _startSuspended = false;
-		bool _spawnExec = false; // x86Code: see setSpawnExec
+		bool _spawnExec = false; // x86Sim: see setSpawnExec
 		bool _pendingReplacement = false;
 		std::unordered_map<uintptr_t, std::shared_ptr<Kqchan>> _kqchannels;
 		std::unordered_map<uintptr_t, std::weak_ptr<Kqchan::Process>> _listeningKqchannels;
@@ -131,7 +131,7 @@ namespace DarlingServer {
 #endif
 
 		std::shared_ptr<Thread> _pickS2CThread(void) const;
-		// x86Code (willi/darlingserver#14)
+		// x86Sim (willi/darlingserver#14)
 		template<typename Function>
 		auto _performS2C(Function&& function);
 
@@ -173,7 +173,7 @@ namespace DarlingServer {
 
 		bool startSuspended() const;
 		void setStartSuspended(bool startSuspended);
-		void setSpawnExec(bool spawnExec); // x86Code
+		void setSpawnExec(bool spawnExec); // x86Sim
 
 		bool readMemory(uintptr_t remoteAddress, void* localBuffer, size_t length, int* errorCode = nullptr) const;
 		bool writeMemory(uintptr_t remoteAddress, const void* localBuffer, size_t length, int* errorCode = nullptr) const;

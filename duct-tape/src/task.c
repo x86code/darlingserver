@@ -116,7 +116,7 @@ dtape_task_t* dtape_task_create(dtape_task_t* parent_task, uint32_t nsid, void* 
 	}
 
 	task->xnu_task.audit_token.val[5] = task->saved_pid;
-	// x86Code: like XNU's p_idversion, a non-zero number unique to this process instance
+	// x86Sim: like XNU's p_idversion, a non-zero number unique to this process instance
 	// (libxpc checks it when fetching its own audit token)
 	{
 		static uint32_t next_idversion = 0;
@@ -198,7 +198,7 @@ void dtape_task_release(dtape_task_t* task) {
 };
 
 void dtape_task_dying(dtape_task_t* task) {
-	// x86Code: (from willi/darlingserver#3) as XNU's task_terminate_internal() does when a process exits, its port
+	// x86Sim: (from willi/darlingserver#3) as XNU's task_terminate_internal() does when a process exits, its port
 	// rights die with it, not with the last reference to the task. A process whose main thread exited first (an XPC
 	// service in xpc_main()/dispatch_main()) leaks a task reference, so its rights lived on: a client waiting for a
 	// reply from it (datamigrator from migrationpluginwrapper) never got the send-once notification and hung.
@@ -233,7 +233,7 @@ bool dtape_task_try_resume(dtape_task_t* task) {
 };
 
 void task_deallocate(task_t xtask) {
-	// x86Code: as XNU's task_deallocate(), a null task is a no-op. MIG server stubs release what convert_port_to_task()
+	// x86Sim: as XNU's task_deallocate(), a null task is a no-op. MIG server stubs release what convert_port_to_task()
 	// gave them, and that is TASK_NULL for a null port: mach_memory_entry_ownership(entry, TASK_NULL, ...) (WebKit's
 	// GPU process giving up ownership of shared memory) crashed darlingserver here, and every process with it.
 	if (xtask == TASK_NULL) {
@@ -321,7 +321,7 @@ kern_return_t task_get_state(task_t  task, int flavor, thread_state_t state, mac
 };
 
 kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_info_out, mach_msg_type_number_t* task_info_count) {
-	// x86Code: as XNU's task_info: a port that names no task (a debugger asking for TASK_DYLD_INFO of a process that
+	// x86Sim: as XNU's task_info: a port that names no task (a debugger asking for TASK_DYLD_INFO of a process that
 	// just died) is KERN_INVALID_ARGUMENT; this dereferenced NULL and took darlingserver (the whole container) down
 	if (xtask == TASK_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -547,7 +547,7 @@ kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_inf
 		};
 
 		default:
-			// x86Code: an unknown flavor (iOS 27's arm64 daemons ask for some) is KERN_INVALID_ARGUMENT, as XNU
+			// x86Sim: an unknown flavor (iOS 27's arm64 daemons ask for some) is KERN_INVALID_ARGUMENT, as XNU
 			// answers flavors it doesn't have; aborting here took the whole container down
 			dtape_log_warning("task_info: unimplemented flavor %d", flavor);
 			return KERN_INVALID_ARGUMENT;

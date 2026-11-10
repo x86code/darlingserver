@@ -43,7 +43,7 @@ namespace DarlingServer {
 		size_t _threadsAvailable = 0;
 		std::condition_variable _cv;
 		bool _dying = false;
-		// x86Code: inline mode (no worker threads): the owner (darlingserver's epoll thread) runs the items itself with
+		// x86Sim: inline mode (no worker threads): the owner (darlingserver's epoll thread) runs the items itself with
 		// drain(). With one worker, every RPC cost the epoll thread a futex wake of the worker and a context switch.
 		bool _inline = false;
 
@@ -169,7 +169,7 @@ namespace DarlingServer {
 			return _inline;
 		};
 
-		// x86Code: inline mode: run queued items (and the ones they queue) until none is left; returns how many ran.
+		// x86Sim: inline mode: run queued items (and the ones they queue) until none is left; returns how many ran.
 		size_t drain() {
 			size_t ran = 0;
 			while (true) {

@@ -53,7 +53,7 @@ dtape_thread_t* dtape_thread_create(dtape_task_t* task, uint64_t nsid, void* con
 	thread->processing_signal = false;
 	thread->name = NULL;
 	thread->waiting_suspended = false;
-	thread->off_task_list = false; // x86Code (willi/darlingserver#10)
+	thread->off_task_list = false; // x86Sim (willi/darlingserver#10)
 	libsimple_lock_init(&thread->wake_lock);
 	LIST_INIT(&thread->user_states);
 	dtape_mutex_init(&thread->suspension_mutex);
@@ -150,7 +150,7 @@ void dtape_thread_destroy(dtape_thread_t* thread) {
 
 	lck_mtx_destroy(&thread->xnu_thread.mutex, LCK_GRP_NULL);
 
-	// remove this thread from the task's thread list, unless dtape_thread_dying() has (x86Code, willi/darlingserver#10)
+	// remove this thread from the task's thread list, unless dtape_thread_dying() has (x86Sim, willi/darlingserver#10)
 	task_lock(thread->xnu_thread.task);
 	if (!thread->off_task_list) {
 		queue_remove(&thread->xnu_thread.task->threads, &thread->xnu_thread, thread_t, task_threads);
@@ -409,7 +409,7 @@ void dtape_thread_wait_while_user_suspended(dtape_thread_t* thread) {
 		dtape_mutex_unlock(&thread->suspension_mutex);
 		dtape_condvar_signal(&thread->suspension_condvar, SIZE_MAX);
 
-		// x86Code: the suspender's thread_wait() returns as soon as waiting_suspended is set, and a thread_resume()
+		// x86Sim: the suspender's thread_wait() returns as soon as waiting_suspended is set, and a thread_resume()
 		// (JSC's GC: thread_suspend, thread_get_state, thread_resume, a few microseconds apart) could then run
 		// thread_release() before this microthread was suspended: Thread::resume() of a thread that isn't suspended does
 		// nothing, and we slept here for ever with suspend_count 0 (Safari's main thread after a few relaunches: a black
@@ -490,7 +490,7 @@ void dtape_thread_dying(dtape_thread_t* thread) {
 	clear_wait_internal(&thread->xnu_thread, THREAD_INTERRUPTED);
 	thread_unlock(&thread->xnu_thread);
 
-	// x86Code (willi/darlingserver#10): off its task's thread list, as XNU's thread_terminate_daemon() takes a terminated
+	// x86Sim (willi/darlingserver#10): off its task's thread list, as XNU's thread_terminate_daemon() takes a terminated
 	// thread: task_threads() no longer lists it. A dead thread kept until its process dies is released later, and
 	// dtape_thread_destroy() then leaves the list alone.
 	task_lock(thread->xnu_thread.task);
@@ -512,7 +512,7 @@ void (thread_reference)(thread_t thread) {
 };
 
 void thread_deallocate(thread_t xthread) {
-	// x86Code: a null thread is a no-op, as in XNU (see task_deallocate)
+	// x86Sim: a null thread is a no-op, as in XNU (see task_deallocate)
 	if (xthread == THREAD_NULL) {
 		return;
 	}
@@ -1577,7 +1577,7 @@ void thread_hold(thread_t xthread) {
 void thread_release(thread_t xthread) {
 	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
 	dtape_log_debug("sigexc: thread_release(%p)\n", xthread);
-	// x86Code: under the wake lock, see dtape_thread_wait_while_user_suspended()
+	// x86Sim: under the wake lock, see dtape_thread_wait_while_user_suspended()
 	libsimple_lock_lock(&thread->wake_lock);
 	xthread->suspend_count--;
 	dtape_hooks->thread_resume(thread->context);

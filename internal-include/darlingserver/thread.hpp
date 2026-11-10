@@ -48,7 +48,7 @@ namespace DarlingServer {
 		friend class Process;
 		friend class Call; // HACK, see call.cpp
 		friend class Registry<Thread>;
-		friend class Server; // x86Code: claimScheduling() (willi/darlingserver#13)
+		friend class Server; // x86Sim: claimScheduling() (willi/darlingserver#13)
 
 	public:
 		enum class RunState {
@@ -88,14 +88,14 @@ namespace DarlingServer {
 		dtape_thread_t* _dtapeThread;
 		std::function<void()> _continuationCallback = nullptr;
 		bool _running = false;
-		// x86Code (willi/darlingserver#13): on the work queue, its doWork() not yet started (Server::scheduleThread())
+		// x86Sim (willi/darlingserver#13): on the work queue, its doWork() not yet started (Server::scheduleThread())
 		std::atomic<bool> _scheduled{false};
 		// Server::scheduleThread() only: whether the thread wasn't on the work queue already (and now is)
 		bool claimScheduling();
 		bool _terminating = false;
 		std::shared_ptr<Call> _activeCall = nullptr;
 		std::shared_ptr<Thread> _impersonating = nullptr;
-		// x86Code (Speed 32): _impersonating's raw pointer, for current_thread() without the rwlock and shared_ptr copies
+		// x86Sim (Speed 32): _impersonating's raw pointer, for current_thread() without the rwlock and shared_ptr copies
 		std::atomic<Thread*> _impersonatingRaw{nullptr};
 		bool _processingSignal = false;
 		bool _pendingCallOverride = false;
@@ -112,12 +112,12 @@ namespace DarlingServer {
 		bool _handlingInterruptedCall = false;
 		dtape_semaphore_t* _s2cInterruptEnterSemaphore = nullptr;
 		dtape_semaphore_t* _s2cInterruptExitSemaphore = nullptr;
-		// x86Code (willi/darlingserver#14): the S2C call waiting for this thread's green light (signal path), 0 for none:
+		// x86Sim (willi/darlingserver#14): the S2C call waiting for this thread's green light (signal path), 0 for none:
 		// S2CPerform takes it, a caller that stops waiting withdraws it, and exec voids it. A stale signal finds none.
 		uint64_t _s2cRequest = 0;
 		// the last request S2CPerform took
 		uint64_t _s2cTaken = 0;
-		// x86Code: S2C calls whose caller stopped waiting after the call was sent: their late replies are dropped
+		// x86Sim: S2C calls whose caller stopped waiting after the call was sent: their late replies are dropped
 		// instead of being taken as the next call's (the "already had one pending" duplicate)
 		uint32_t _s2cAbandonedReplies = 0;
 		bool _deferReplyForS2C = false;
@@ -133,7 +133,7 @@ namespace DarlingServer {
 		std::queue<std::shared_ptr<Call>> _pendingInterrupts;
 		std::optional<Message> _pendingSavedReply = std::nullopt;
 		bool _dead = false;
-		bool _releaseScheduled = false; // x86Code (willi/darlingserver#10)
+		bool _releaseScheduled = false; // x86Sim (willi/darlingserver#10)
 		std::shared_ptr<Thread> _selfReference = nullptr;
 
 		static void microthreadWorker();
@@ -185,7 +185,7 @@ namespace DarlingServer {
 		std::shared_ptr<Process> process() const;
 
 		std::shared_ptr<Call> pendingCall() const;
-		// x86Code (willi #13): false when the call waits behind the pending one (an InterruptEnter)
+		// x86Sim (willi #13): false when the call waits behind the pending one (an InterruptEnter)
 		bool setPendingCall(std::shared_ptr<Call> newPendingCall);
 
 		std::shared_ptr<Call> activeCall() const;
@@ -286,7 +286,7 @@ namespace DarlingServer {
 		bool isDead() const;
 
 		/**
-		 * x86Code (willi/darlingserver#10): informs this Thread instance that its process has died: one that died before
+		 * x86Sim (willi/darlingserver#10): informs this Thread instance that its process has died: one that died before
 		 * it is released now, if its microthread is done with it (a main thread that checked out stays until then).
 		 */
 		void notifyProcessDead();
@@ -298,7 +298,7 @@ namespace DarlingServer {
 		static void syscallReturn(int resultCode);
 
 		static std::shared_ptr<Thread> currentThread();
-		// x86Code (Speed 32): no shared_ptr copy (the thread-local keeps it alive while it is current)
+		// x86Sim (Speed 32): no shared_ptr copy (the thread-local keeps it alive while it is current)
 		static Thread* currentThreadRaw();
 
 		/**

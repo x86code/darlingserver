@@ -38,7 +38,7 @@ struct dtape_thread {
 	bool processing_signal;
 
 	bool waiting_suspended;
-	// x86Code (willi/darlingserver#10): set by dtape_thread_dying(), under the task lock: off its task's thread list
+	// x86Sim (willi/darlingserver#10): set by dtape_thread_dying(), under the task lock: off its task's thread list
 	bool off_task_list;
 	dtape_mutex_t suspension_mutex;
 

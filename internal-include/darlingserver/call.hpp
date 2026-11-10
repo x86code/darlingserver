@@ -49,7 +49,7 @@ namespace DarlingServer {
 		std::weak_ptr<Thread> _thread;
 		Address _replyAddress;
 		dserver_rpc_callhdr_t _header;
-		// x86Code (willi/darlingserver#14): set by callFromMessage()
+		// x86Sim (willi/darlingserver#14): set by callFromMessage()
 		bool _madeByMldr = false;
 
 		static DarlingServer::Log rpcReplyLog;
@@ -63,7 +63,7 @@ namespace DarlingServer {
 		static std::shared_ptr<Call> callFromMessage(Message&& requestMessage);
 
 		virtual Number number() const = 0;
-		// x86Code (willi/darlingserver#14): mldr's checkin or thread-exit checkout, not libsystem's (fork child, exec)
+		// x86Sim (willi/darlingserver#14): mldr's checkin or thread-exit checkout, not libsystem's (fork child, exec)
 		bool madeByMldr() const { return _madeByMldr; };
 		std::shared_ptr<Thread> thread() const;
 

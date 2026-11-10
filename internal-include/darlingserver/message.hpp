@@ -165,7 +165,7 @@ namespace DarlingServer {
 		std::function<void()> _messageArrivalNotificationCallback = nullptr;
 
 		bool _sendManyLocked(int socket);
-		// x86Code (willi/darlingserver#15): receiveMany()'s buffers, made on its first call; a slot is replaced only once
+		// x86Sim (willi/darlingserver#15): receiveMany()'s buffers, made on its first call; a slot is replaced only once
 		// its message is taken
 		std::vector<Message> _receiveSlots;
 		size_t _receiveWidth;

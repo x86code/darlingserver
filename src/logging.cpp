@@ -108,7 +108,7 @@ std::string DarlingServer::Log::_typeToString(Type type) {
 	}
 };
 
-// x86Code: the level/category filter of _log, also asked when a Stream is made
+// x86Sim: the level/category filter of _log, also asked when a Stream is made
 static int dserverLogFile() {
 	static int logFile = []() {
 		std::filesystem::path path(DarlingServer::Server::sharedInstance().prefix() + "/private/var/log/dserver.log");

@@ -603,13 +603,13 @@ int main(int argc, char** argv) {
 		exit(1);
 	}
 
-	// x86Code: X86CODE_PRIVATE_SHM=1 (arm64 boots): make this namespace's mounts slaves *before* replacing /dev/shm.
+	// x86Sim: X86SIM_PRIVATE_SHM=1 (arm64 boots): make this namespace's mounts slaves *before* replacing /dev/shm.
 	// systemd marks / MS_SHARED, so the umount/mount below propagates back to the host: every container start stacked
 	// a new empty tmpfs over the host's /dev/shm (617 layers after a few days), and a second container hid the first
 	// one's /dev/shm files (its frame ring and the simulator's shm objects) from the host and from the first container.
 	// Then the container's /dev/shm is its own; frame rings go elsewhere (/run/user/<uid>, see boot-a64.sh). Unset:
 	// as before (the x86 stack's ring is in /dev/shm and relies on the propagation).
-	const char* privateShm = getenv("X86CODE_PRIVATE_SHM");
+	const char* privateShm = getenv("X86SIM_PRIVATE_SHM");
 	if (privateShm && atoi(privateShm) == 1 && mount(NULL, "/", NULL, MS_REC | MS_SLAVE, NULL) != 0)
 	{
 		fprintf(stderr, "Cannot remount / as slave: %s\n", strerror(errno));
@@ -746,7 +746,7 @@ int main(int argc, char** argv) {
 
 	// drop our privileges. For good: Message reads its credentials once, when the first one is made (in the Server, below),
 	// so none may be made before this, and darlingserver's credentials may not change after it.
-	// x86Code (willi/darlingserver#20): run at nice -10 while we're still root. Every Mach call and trap of every Darling
+	// x86Sim (willi/darlingserver#20): run at nice -10 while we're still root. Every Mach call and trap of every Darling
 	// process waits on darlingserver, so at nice 0 a call queued behind the work of the very processes waiting for it.
 	// On Linux this sets this thread's nice value and the Server's workers (made below) inherit it; launchd, cloned
 	// above, and every process it starts keep the nice value we started with. DSERVER_NICE=<n> overrides (0: unchanged).

@@ -24,10 +24,10 @@
 #include <new>
 #include <mutex>
 #include <system_error>
-#include <algorithm> // x86Code
-#include <cstring> // x86Code
+#include <algorithm> // x86Sim
+#include <cstring> // x86Sim
 
-// x86Code (willi/darlingserver#15): the credentials a Message sends with (SCM_CREDENTIALS), read once: three syscalls
+// x86Sim (willi/darlingserver#15): the credentials a Message sends with (SCM_CREDENTIALS), read once: three syscalls
 // for every Message. They don't change once the first Message exists: main() drops privileges for good before it
 // creates the Server, and darlingserver never forks a process that makes Messages (its one clone() runs launchd).
 static const struct ucred& ourCredentials() {
@@ -634,7 +634,7 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
 			messages[i] = Message();
 		}
 
-		// x86Code (Speed 32): a short batch means the queue was empty when recvmmsg() looked. The listener is
+		// x86Sim (Speed 32): a short batch means the queue was empty when recvmmsg() looked. The listener is
 		// edge-triggered and a datagram queued after that look raises a new edge, so the extra pass that only ended in
 		// EAGAIN (one syscall per RPC at low load) is not needed.
 		if (ret > 0 && (size_t)ret < messages.size()) {

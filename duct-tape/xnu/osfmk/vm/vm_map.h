@@ -199,7 +199,7 @@ struct vm_named_entry {
 	/* boolean_t */ is_sub_map:1,           /* ... a submap? */
 	/* boolean_t */ is_copy:1;              /* ... a VM map copy */
 #ifdef __DARLING__
-	// x86Code: memfd-backed contents (struct dtape_map_shared_descriptor), see memory.c
+	// x86Sim: memfd-backed contents (struct dtape_map_shared_descriptor), see memory.c
 	void*                   dtape_descriptor;
 #endif
 #if VM_NAMED_ENTRY_LIST

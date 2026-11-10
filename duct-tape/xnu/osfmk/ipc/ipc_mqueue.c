@@ -615,7 +615,7 @@ retry:
 
 		case THREAD_TIMED_OUT:
 #ifdef __DARLING__
-			// x86Code: the wait can end as "timed out" without a deadline (seen with
+			// x86Sim: the wait can end as "timed out" without a deadline (seen with
 			// SpringBoard filling a queue); that is a spurious wakeup, so wait again
 			if (!(option & MACH_SEND_TIMEOUT)) {
 				imq_lock(mqueue);
@@ -949,7 +949,7 @@ ipc_mqueue_receive_results(wait_result_t saved_wait_result)
 
 	case THREAD_INTERRUPTED:
 #ifdef __DARLING__
-	// x86Code: a duct-tape thread can be resumed with its wait still THREAD_WAITING (-1): an interrupt (a signal
+	// x86Sim: a duct-tape thread can be resumed with its wait still THREAD_WAITING (-1): an interrupt (a signal
 	// being processed, dserver_rpc_interrupt_enter) resumes the microthread that blocks in a kernel RPC, e.g. the
 	// mach_exception_raise of a signal to an attached debugger. XNU never sees this; it panicked here and took the
 	// whole container down (every process SIGILL) on `x86sim debug` of SpringBoard. Treat it as an interrupted wait.

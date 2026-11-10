@@ -8,7 +8,7 @@
 #include <fcntl.h>
 #include <atomic>
 
-extern "C" void x86code_rpcstat_slot(unsigned slot); // x86Code (Speed 36): call.cpp counters
+extern "C" void x86sim_rpcstat_slot(unsigned slot); // x86Sim (Speed 36): call.cpp counters
 static DarlingServer::Log kqchanLog("kqchan");
 static DarlingServer::Log kqchanMachPortLog("kqchan:mach_port");
 static DarlingServer::Log kqchanProcLog("kqchan:proc");
@@ -146,7 +146,7 @@ int DarlingServer::Kqchan::setup() {
 };
 
 void DarlingServer::Kqchan::_sendNotification() {
-	x86code_rpcstat_slot(502);
+	x86sim_rpcstat_slot(502);
 	std::unique_lock lock(_notificationMutex);
 
 	kqchanLog.debug() << *this << ": received request to send notification" << kqchanLog.endLog;
@@ -319,7 +319,7 @@ void DarlingServer::Kqchan::MachPort::_processMessages() {
 };
 
 void DarlingServer::Kqchan::MachPort::_modify(uint64_t receiveBuffer, uint64_t receiveBufferSize, uint64_t savedFilterFlags, pid_t nstid) {
-	x86code_rpcstat_slot(501);
+	x86sim_rpcstat_slot(501);
 	kqchanMachPortLog.debug() << *this << ": Received modification request with {receiveBuffer=" << receiveBuffer << ",receiveBufferSize=" << receiveBufferSize << ",savedFilterFlags=" << savedFilterFlags << "}" << kqchanMachPortLog.endLog;
 
 	auto maybeThread = threadRegistry().lookupEntryByNSID(nstid);
@@ -364,7 +364,7 @@ void DarlingServer::Kqchan::MachPort::_modify(uint64_t receiveBuffer, uint64_t r
 };
 
 void DarlingServer::Kqchan::MachPort::_read(uint64_t defaultBuffer, uint64_t defaultBufferSize, pid_t nstid) {
-	x86code_rpcstat_slot(500);
+	x86sim_rpcstat_slot(500);
 	kqchanMachPortLog.debug() << *this << ": received read request with {defaultBuffer=" << defaultBuffer << ",defaultBufferSize=" << defaultBufferSize << "}" << kqchanMachPortLog.endLog;
 
 	{

@@ -26,15 +26,15 @@
 
 #include <fstream>
 #include <regex>
-#include <utility> // x86Code
-#include <vector> // x86Code
+#include <utility> // x86Sim
+#include <vector> // x86Sim
 
 #include <sys/mman.h>
-#include <fcntl.h> // x86Code
+#include <fcntl.h> // x86Sim
 #include <sys/ioctl.h>
-#include <linux/fs.h> // x86Code: PROCMAP_QUERY
+#include <linux/fs.h> // x86Sim: PROCMAP_QUERY
 #ifndef PROCMAP_QUERY
-// x86Code: kernel headers before 6.11 (e.g. Ubuntu 24.04's, the release build) lack it; the ioctl is stable ABI and
+// x86Sim: kernel headers before 6.11 (e.g. Ubuntu 24.04's, the release build) lack it; the ioctl is stable ABI and
 // older running kernels answer ENOTTY (the maps parser below then takes over)
 #ifndef PROCFS_IOCTL_MAGIC
 #define PROCFS_IOCTL_MAGIC 'f'
@@ -66,8 +66,8 @@ struct procmap_query {
 };
 #define PROCMAP_QUERY _IOWR(PROCFS_IOCTL_MAGIC, 17, struct procmap_query)
 #endif
-#include <string_view> // x86Code
-#include <cstring> // x86Code
+#include <string_view> // x86Sim
+#include <cstring> // x86Sim
 
 static DarlingServer::Log processLog("process");
 
@@ -236,7 +236,7 @@ void DarlingServer::Process::setStartSuspended(bool startSuspended) {
 	_startSuspended = startSuspended;
 };
 
-// x86Code: posix_spawn returns once the child has exec'd on macOS, so nobody can see that exec as NOTE_EXEC.
+// x86Sim: posix_spawn returns once the child has exec'd on macOS, so nobody can see that exec as NOTE_EXEC.
 // Here the parent's posix_spawn returns at the Linux execve of mldr and the child registers the exec with us
 // later, after the parent may have attached an EVFILT_PROC source: launchd_sim then took xpcproxy_sim's own
 // start for the exec of the service and marked the job running before xpcproxy_sim had exec'd the real
@@ -374,7 +374,7 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
 		auto newThread = dtape_thread_create(_dtapeTask, mainThread->_nstid, mainThread.get());
 		mainThread->_dtapeThread = newThread;
 
-		// destroy the main thread's old S2C semaphores: x86Code (willi/darlingserver#10/#14): taken under the thread's
+		// destroy the main thread's old S2C semaphores: x86Sim (willi/darlingserver#10/#14): taken under the thread's
 		// lock, as _s2cPerform() retains them under it; a request on the old ones is void
 		dtape_semaphore_t* oldS2CSemaphores[4];
 		{
@@ -405,7 +405,7 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
 		// create a new fork-wait semaphore for the new task
 		_dtapeForkWaitSemaphore = dtape_semaphore_create(_dtapeTask, 0);
 
-		// create new S2C semaphores for the main thread (x86Code: set under its lock, willi/darlingserver#10)
+		// create new S2C semaphores for the main thread (x86Sim: set under its lock, willi/darlingserver#10)
 		{
 			auto performSemaphore = dtape_semaphore_create(_dtapeTask, 1);
 			auto replySemaphore = dtape_semaphore_create(_dtapeTask, 0);
@@ -427,7 +427,7 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
 
 	_pendingReplacement = false;
 
-	bool spawnExec = _spawnExec; // x86Code
+	bool spawnExec = _spawnExec; // x86Sim
 	_spawnExec = false;
 
 	lock.unlock();
@@ -438,7 +438,7 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
 	} else {
 		// notify the parent process (if we have one) that we've arrived
 		if (auto parent = _parentProcess.lock()) {
-			// x86Code: the parent may have died meanwhile; its fork-wait semaphore is then already destroyed (null),
+			// x86Sim: the parent may have died meanwhile; its fork-wait semaphore is then already destroyed (null),
 			// and dtape_semaphore_up(NULL) took darlingserver and the whole container down (seen when a simulator
 			// app's spawner exited while the app was checking in)
 			if (auto sem = parent->_dtapeForkWaitSemaphore)
@@ -538,7 +538,7 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
 	return info;
 };
 
-// x86Code: /proc/<pid>/maps is parsed by hand, not with std::regex. mach_make_memory_entry (every xpc_shmem, e.g.
+// x86Sim: /proc/<pid>/maps is parsed by hand, not with std::regex. mach_make_memory_entry (every xpc_shmem, e.g.
 // MTLSimDriver's command-buffer segments) and the memfd-for-region RPC look a region up here, and a simulator process
 // has thousands of mappings: matching a regex against every line took ~75% of darlingserver's worker thread during
 // CoreAnimation animations, which capped the frame rate. Only the line holding the address is parsed in full.
@@ -574,7 +574,7 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
 		throw std::system_error(EFAULT, std::generic_category());
 	}
 
-	// x86Code: ask the kernel for the one VMA (PROCMAP_QUERY, Linux 6.11+) instead of reading and parsing the
+	// x86Sim: ask the kernel for the one VMA (PROCMAP_QUERY, Linux 6.11+) instead of reading and parsing the
 	// whole maps file (a 256 KB buffer and thousands of lines per call; 5-9% of darlingserver while scrolling,
 	// called for every out-of-line memory and memory entry); older kernels fall through to the parser
 	{
@@ -662,7 +662,7 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
 				if (permsView.find('x') != std::string_view::npos) info.protection |= PROT_EXEC;
 				info.shared = permsView.find('s') != std::string_view::npos;
 				info.inode = inode;
-				// x86Code: shared anonymous memory is a shmem object Linux names "/dev/zero (deleted)"
+				// x86Sim: shared anonymous memory is a shmem object Linux names "/dev/zero (deleted)"
 				info.anonShared = info.shared && pathView.rfind("/dev/zero", 0) == 0;
 				found = true;
 				break;
@@ -741,7 +741,7 @@ std::shared_ptr<DarlingServer::Thread> DarlingServer::Process::_pickS2CThread(vo
 	}
 
 	// if we're the process for the current thread (i.e. we're the current process), use the current thread, unless
-	// it's dying (x86Code, willi/darlingserver#14)
+	// it's dying (x86Sim, willi/darlingserver#14)
 	if (currentProcess().get() == this) {
 		auto current = Thread::currentThread();
 		if (current && !current->isDead()) {
@@ -749,7 +749,7 @@ std::shared_ptr<DarlingServer::Thread> DarlingServer::Process::_pickS2CThread(vo
 		}
 	}
 
-	// otherwise, pick any thread that isn't dead (a dead one would never take it). x86Code (willi/darlingserver#14): the
+	// otherwise, pick any thread that isn't dead (a dead one would never take it). x86Sim (willi/darlingserver#14): the
 	// weak references are copied under the lock and locked outside it, as notifyDead() does: the last reference to a
 	// dying thread may be the one taken here, and ~Thread takes this lock.
 	std::vector<std::weak_ptr<Thread>> candidates;
@@ -778,7 +778,7 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
 	_executablePath = std::move(path);
 };
 
-// x86Code (willi/darlingserver#14): runs `function` with a thread of ours to perform the S2C call. One that dies before
+// x86Sim (willi/darlingserver#14): runs `function` with a thread of ours to perform the S2C call. One that dies before
 // it takes the call fails it with ESRCH, unsent, and another thread is picked (_pickS2CThread() skips the dead), 16
 // tries at most. As XNU's vm_map_enter() into another task doesn't depend on which of its threads runs.
 template<typename Function>
@@ -889,14 +889,14 @@ void DarlingServer::Process::notifyDead() {
 		if (!thread) {
 			continue;
 		}
-		thread->notifyProcessDead(); // x86Code (willi/darlingserver#10)
+		thread->notifyProcessDead(); // x86Sim (willi/darlingserver#10)
 	}
 
 	// schedule the duct-taped task to be released
 	// dtape_thread_release needs a microthread context, so we call it within a kernel microthread
 	// also destroy the fork-wait semaphore here
 	Thread::kernelAsync([self = shared_from_this()]() {
-		// x86Code: (willi/darlingserver#3) its threads are dead: terminate the task's IPC now, as XNU does
+		// x86Sim: (willi/darlingserver#3) its threads are dead: terminate the task's IPC now, as XNU does
 		// (ipc_space_terminate can block, so this needs the microthread context)
 		dtape_task_dying(self->_dtapeTask);
 

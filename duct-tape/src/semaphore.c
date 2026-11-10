@@ -13,7 +13,7 @@ dtape_semaphore_t* dtape_semaphore_create(dtape_task_t* owning_task, int initial
 	}
 
 	semaphore->owning_task = owning_task;
-	semaphore->references = 1; // x86Code (willi/darlingserver#6)
+	semaphore->references = 1; // x86Sim (willi/darlingserver#6)
 
 	if (semaphore_create(&semaphore->owning_task->xnu_task, &semaphore->xnu_semaphore, 0, initial_value) != KERN_SUCCESS) {
 		free(semaphore);
@@ -23,7 +23,7 @@ dtape_semaphore_t* dtape_semaphore_create(dtape_task_t* owning_task, int initial
 	return semaphore;
 };
 
-// x86Code (willi/darlingserver#6): reference-counted, so a retained semaphore outlives its destroy
+// x86Sim (willi/darlingserver#6): reference-counted, so a retained semaphore outlives its destroy
 static void dtape_semaphore_put(dtape_semaphore_t* semaphore) {
 	if (__atomic_sub_fetch(&semaphore->references, 1, __ATOMIC_ACQ_REL) == 0) {
 		free(semaphore);
@@ -50,7 +50,7 @@ void dtape_semaphore_release(dtape_semaphore_t* semaphore) {
 };
 
 void dtape_semaphore_up(dtape_semaphore_t* semaphore) {
-	// x86Code (willi/darlingserver#10): one destroyed while a user still held a reference has no one to wake (XNU's
+	// x86Sim (willi/darlingserver#10): one destroyed while a user still held a reference has no one to wake (XNU's
 	// semaphore_signal() answers KERN_TERMINATED)
 	kern_return_t kr = semaphore_signal(semaphore->xnu_semaphore);
 	if (kr != KERN_SUCCESS && kr != KERN_TERMINATED) {
@@ -76,7 +76,7 @@ bool dtape_semaphore_down_simple(dtape_semaphore_t* semaphore) {
 		case KERN_SUCCESS:
 			return true;
 		case KERN_ABORTED:
-		// x86Code (willi/darlingserver#10): destroyed while retained; like an interruption, the wait is over
+		// x86Sim (willi/darlingserver#10): destroyed while retained; like an interruption, the wait is over
 		case KERN_TERMINATED:
 			return false;
 		default:

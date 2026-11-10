@@ -1909,7 +1909,7 @@ task_set_special_port(
 }
 
 /*
- * x86Code: set a special port of the current task the way posix_spawn port
+ * x86Sim: set a special port of the current task the way posix_spawn port
  * actions do in XNU (exec_handle_port_actions): immovable send rights are
  * accepted, unlike task_set_special_port() from user space. Used by Darling's
  * posix_spawn emulation right before exec (xpcproxy hands jobs their bootstrap

@@ -28,53 +28,53 @@
 #include <sys/fcntl.h>
 #include <sys/syscall.h>
 #include <darlingserver/kqchan.hpp>
-#include <utility> // x86Code
+#include <utility> // x86Sim
 
 static DarlingServer::Log callLog("calls");
 
 DarlingServer::Log DarlingServer::Call::rpcReplyLog("replies");
 
 
-// x86Code (Speed 36): opt-in RPC counters for the mach_msg fast-path study. On while the file
-// /home/bobby/scratch/x86code/ds-rpcstats.on exists (checked once a second); every second with traffic, one line of
-// per-call-number counts and mach_msg shapes is appended to /home/bobby/scratch/x86code/ds-rpcstats.log.
+// x86Sim (Speed 36): opt-in RPC counters for the mach_msg fast-path study. On while the file
+// /home/bobby/scratch/x86sim/ds-rpcstats.on exists (checked once a second); every second with traffic, one line of
+// per-call-number counts and mach_msg shapes is appended to /home/bobby/scratch/x86sim/ds-rpcstats.log.
 #include <atomic>
 #include <ctime>
 #include <unistd.h>
 #include <cstdio>
-extern "C" int x86code_rpcstats_on;
-int x86code_rpcstats_on = 0;
-static std::atomic<uint64_t> x86code_calls[512];
+extern "C" int x86sim_rpcstats_on;
+int x86sim_rpcstats_on = 0;
+static std::atomic<uint64_t> x86sim_calls[512];
 // shapes: 0 simple no-local, 1 simple + local send-once (request), 2 simple + other local, 3 complex, 4 voucher; +5 when combined with a receive
-static std::atomic<uint64_t> x86code_shapes[10];
-extern "C" void x86code_rpcstat_msg(unsigned int bits, int rcv) {
+static std::atomic<uint64_t> x86sim_shapes[10];
+extern "C" void x86sim_rpcstat_msg(unsigned int bits, int rcv) {
 	int k = (bits & 0x80000000u) ? 3 : ((bits >> 16) & 0x1f) ? 4 : ((bits >> 8) & 0x1f) == 0 ? 0 :
 		((bits >> 8) & 0x1f) == 21 /* MAKE_SEND_ONCE */ ? 1 : 2;
-	x86code_shapes[k + (rcv ? 5 : 0)]++;
+	x86sim_shapes[k + (rcv ? 5 : 0)]++;
 }
-extern "C" void x86code_rpcstat_slot(unsigned slot) {
-	if (x86code_rpcstats_on && slot < 512) x86code_calls[slot]++;
+extern "C" void x86sim_rpcstat_slot(unsigned slot) {
+	if (x86sim_rpcstats_on && slot < 512) x86sim_calls[slot]++;
 }
-static void x86code_rpcstats_tick(unsigned number) {
+static void x86sim_rpcstats_tick(unsigned number) {
 	static std::atomic<int64_t> last{0};
 	timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
 	int64_t sec = ts.tv_sec, l = last.load();
 	if (sec != l && last.compare_exchange_strong(l, sec)) {
-		bool was = x86code_rpcstats_on;
-		x86code_rpcstats_on = access("/home/bobby/scratch/x86code/ds-rpcstats.on", F_OK) == 0;
+		bool was = x86sim_rpcstats_on;
+		x86sim_rpcstats_on = access("/home/bobby/scratch/x86sim/ds-rpcstats.on", F_OK) == 0;
 		if (was) {
-			FILE* f = fopen("/home/bobby/scratch/x86code/ds-rpcstats.log", "a");
+			FILE* f = fopen("/home/bobby/scratch/x86sim/ds-rpcstats.log", "a");
 			if (f) {
 				fprintf(f, "t=%lld calls", (long long)sec);
-				for (int i = 0; i < 512; i++) { uint64_t c = x86code_calls[i].exchange(0); if (c) fprintf(f, " %d:%llu", i, (unsigned long long)c); }
+				for (int i = 0; i < 512; i++) { uint64_t c = x86sim_calls[i].exchange(0); if (c) fprintf(f, " %d:%llu", i, (unsigned long long)c); }
 				fprintf(f, " | shapes");
-				for (int i = 0; i < 10; i++) fprintf(f, " %llu", (unsigned long long)x86code_shapes[i].exchange(0));
+				for (int i = 0; i < 10; i++) fprintf(f, " %llu", (unsigned long long)x86sim_shapes[i].exchange(0));
 				fprintf(f, "\n");
 				fclose(f);
 			}
 		}
 	}
-	if (x86code_rpcstats_on && number < 512) x86code_calls[number]++;
+	if (x86sim_rpcstats_on && number < 512) x86sim_calls[number]++;
 }
 std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Message&& requestMessage) {
 	if (requestMessage.data().size() < sizeof(dserver_rpc_callhdr_t)) {
@@ -83,7 +83,7 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
 
 	dserver_rpc_callhdr_t* header = reinterpret_cast<dserver_rpc_callhdr_t*>(requestMessage.data().data());
 	std::shared_ptr<Call> result = nullptr;
-	x86code_rpcstats_tick(header->number);
+	x86sim_rpcstats_tick(header->number);
 	std::shared_ptr<Process> process = nullptr;
 	std::shared_ptr<Thread> thread = nullptr;
 
@@ -174,13 +174,13 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
 	if (header->number == dserver_callnum_s2c) {
 		// this is an S2C reply
 
-		// x86Code (willi/darlingserver#10): taken under the lock (a released thread has none) and retained
+		// x86Sim (willi/darlingserver#10): taken under the lock (a released thread has none) and retained
 		dtape_semaphore_t* replySemaphore;
 		{
 			std::unique_lock lock(thread->_rwlock);
 
 			if (thread->_s2cAbandonedReplies > 0) {
-				// x86Code: the reply to an S2C call whose caller stopped waiting after sending it (Thread::_s2cPerform()).
+				// x86Sim: the reply to an S2C call whose caller stopped waiting after sending it (Thread::_s2cPerform()).
 				// Taken as the next call's reply, it was that call's "duplicate"; the next call's own reply was dropped,
 				// and its caller got another call's answer (or none, and its thread hung in its S2C interrupt).
 				thread->_s2cAbandonedReplies--;
@@ -189,7 +189,7 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
 			}
 
 			if (thread->_s2cReply) {
-				// x86Code: a client's second S2C reply is its protocol error: drop it instead of throwing out of the
+				// x86Sim: a client's second S2C reply is its protocol error: drop it instead of throwing out of the
 				// main loop and taking every process down with darlingserver (as willi/darlingserver#7 contains it;
 				// seen once Swift's cooperative pool made workqueue threads come and go much more often)
 				callLog.error() << *thread << ": Received S2C reply but thread already had one pending; dropped it" << callLog.endLog;
@@ -280,7 +280,7 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
 
 	#undef CALL_CASE
 
-	// x86Code (willi/darlingserver#14): Thread::_s2cPerform() gives mldr's checkin and thread-exit checkout the S2C
+	// x86Sim (willi/darlingserver#14): Thread::_s2cPerform() gives mldr's checkin and thread-exit checkout the S2C
 	// signal (mldr's RPC hooks abort on an S2C call); libsystem's (fork child's checkin, exec's checkout) serve it inline.
 	if (auto checkin = std::dynamic_pointer_cast<Checkin>(result)) {
 		result->_madeByMldr = !checkin->_body.is_fork;
@@ -289,7 +289,7 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
 	}
 
 	if (thread) {
-		// x86Code (willi/darlingserver#13): a call queued behind the pending one is scheduled when that one is done
+		// x86Sim (willi/darlingserver#13): a call queued behind the pending one is scheduled when that one is done
 		if (!thread->setPendingCall(result)) {
 			callLog.debug() << *thread << ": Call queued behind the pending call" << callLog.endLog;
 			return nullptr;
@@ -458,7 +458,7 @@ void DarlingServer::Call::Checkout::processCall() {
 		code = -ESRCH;
 	}
 
-	// x86Code (willi/darlingserver#10): the call is over. A dead thread with no active call is released when it returns
+	// x86Sim (willi/darlingserver#10): the call is over. A dead thread with no active call is released when it returns
 	// to the top of its microthread (doneWorking); with `_thread` reset below, the reply no longer deactivated it, and a
 	// checked-out thread stayed for ever (its duct-taped thread still in task_threads(), its stack). Not the main thread:
 	// mldr parks its Linux thread and the process lives on; it is released with the process (notifyProcessDead()).
@@ -507,7 +507,7 @@ void DarlingServer::Call::TaskSelfTrap::processCall() {
 	_sendReply(0, taskSelfPort);
 };
 
-// x86Code: fileports (see dtape_fileport_makeport)
+// x86Sim: fileports (see dtape_fileport_makeport)
 void DarlingServer::Call::FileportMakeport::processCall() {
 	uint32_t name = 0;
 	int code = dtape_fileport_makeport(_body.fd, &name);
@@ -523,8 +523,8 @@ void DarlingServer::Call::FileportMakefd::processCall() {
 	_sendReply(code, fd); // the reply message closes our copy once sent
 };
 
-// x86Code: see dtape_memfd_for_region
-void DarlingServer::Call::X86CodeMemfdForRegion::processCall() {
+// x86Sim: see dtape_memfd_for_region
+void DarlingServer::Call::X86SimMemfdForRegion::processCall() {
 	int fd = -1;
 	uint64_t offset = 0;
 	uint32_t shared = 0;
@@ -989,7 +989,7 @@ void DarlingServer::Call::StopAfterExec::processCall() {
 	_sendReply(code);
 };
 
-// x86Code: see Process::setSpawnExec
+// x86Sim: see Process::setSpawnExec
 void DarlingServer::Call::SpawnExec::processCall() {
 	int code = 0;
 
@@ -1110,8 +1110,8 @@ void DarlingServer::Call::S2CPerform::processCall() {
 	int code = 0;
 
 	if (auto thread = _thread.lock()) {
-		callLog.debug() << *thread << ": s2c_perform: giving green light" << callLog.endLog; // x86Code
-		// x86Code (willi/darlingserver#14): the request this green light answers, taken with the two semaphores under
+		callLog.debug() << *thread << ": s2c_perform: giving green light" << callLog.endLog; // x86Sim
+		// x86Sim (willi/darlingserver#14): the request this green light answers, taken with the two semaphores under
 		// the lock and retained (notifyDead() and the release destroy them). With no request, the signal is stale: nothing
 		// waits for this green light, so it's answered at once.
 		dtape_semaphore_t* enterSemaphore = nullptr;
@@ -1134,7 +1134,7 @@ void DarlingServer::Call::S2CPerform::processCall() {
 		} else {
 			callLog.warning() << *thread << ": s2c_perform: stale S2C signal, no request" << callLog.endLog;
 		}
-		callLog.debug() << *thread << ": s2c_perform: resuming" << callLog.endLog; // x86Code
+		callLog.debug() << *thread << ": s2c_perform: resuming" << callLog.endLog; // x86Sim
 	} else {
 		code = -ESRCH;
 	}

@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <ipc/ipc_mqueue.h>
 #include <kern/thread.h>
-extern int backtrace(void** buffer, int size); // x86Code: glibc (execinfo.h clashes with XNU headers)
+extern int backtrace(void** buffer, int size); // x86Sim: glibc (execinfo.h clashes with XNU headers)
 
 extern int filt_machportattach(struct knote *kn, struct kevent_qos_s *kev);
 extern void filt_machportdetach(struct knote *kn);
@@ -168,12 +168,12 @@ void knote_vanish(struct klist* list, bool make_active) {
 
 	SLIST_FOREACH_SAFE(kn, list, kn_selnext, tmp) {
 		dtape_log_debug("knote %p is vanishing", kn);
-		// x86Code: diagnostics for unexpected EV_VANISHED (who destroyed/moved the receive right)
+		// x86Sim: diagnostics for unexpected EV_VANISHED (who destroyed/moved the receive right)
 		{
 			dtape_kqchan_mach_port_t* kq = __container_of(kn, dtape_kqchan_mach_port_t, knote);
 			void* bt[16];
 			int n = backtrace(bt, 16);
-			dtape_log_debug("x86Code: kqchan %p (task pid %u, port 0x%x) vanishing, make_active=%d, self %p bt %p %p %p %p %p %p %p %p", kq, kq->task ? kq->task->saved_pid : 0, (unsigned)kn->kn_id, make_active, (void*)knote_vanish,
+			dtape_log_debug("x86Sim: kqchan %p (task pid %u, port 0x%x) vanishing, make_active=%d, self %p bt %p %p %p %p %p %p %p %p", kq, kq->task ? kq->task->saved_pid : 0, (unsigned)kn->kn_id, make_active, (void*)knote_vanish,
 				n > 1 ? bt[1] : 0, n > 2 ? bt[2] : 0, n > 3 ? bt[3] : 0, n > 4 ? bt[4] : 0, n > 5 ? bt[5] : 0, n > 6 ? bt[6] : 0, n > 7 ? bt[7] : 0, n > 8 ? bt[8] : 0);
 		}
 		// TODO: handle the old style of vanishing (i.e. `EV_EOF | EV_ONESHOT`)

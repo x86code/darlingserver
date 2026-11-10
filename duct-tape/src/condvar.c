@@ -18,7 +18,7 @@ void dtape_condvar_signal(dtape_condvar_t* condvar, size_t count) {
 		}
 
 		TAILQ_REMOVE(&condvar->queue_head, link, link);
-		link->link.tqe_prev = NULL; // x86Code: dequeued (see dtape_condvar_wait)
+		link->link.tqe_prev = NULL; // x86Sim: dequeued (see dtape_condvar_wait)
 		dtape_thread_t* thread = __container_of(link, dtape_thread_t, mutex_link);
 		dtape_hooks->thread_resume(thread->context);
 
@@ -45,7 +45,7 @@ void dtape_condvar_wait(dtape_condvar_t* condvar, dtape_mutex_t* mutex) {
 	// this also drops the queue lock.
 	dtape_hooks->thread_suspend(thread->context, NULL, NULL, &condvar->queue_lock);
 
-	// x86Code (Input 3): a resume that wasn't our signal (Thread::resume() from elsewhere) returns here with our link
+	// x86Sim (Input 3): a resume that wasn't our signal (Thread::resume() from elsewhere) returns here with our link
 	// still queued. Callers wait in a loop (thread_wait), and the next wait inserted the queued link again: tqe_next
 	// pointing at itself, and the next dtape_condvar_signal(SIZE_MAX) resumed the same thread for ever, darlingserver at
 	// 100% CPU and every Darling process stalled in its RPCs (an extension's thread_suspend of its own thread, after an

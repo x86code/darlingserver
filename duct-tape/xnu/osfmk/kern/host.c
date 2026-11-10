@@ -1360,7 +1360,7 @@ host_get_special_port(host_priv_t host_priv, __unused int node, int id, ipc_port
 
 #ifdef __DARLING__
 /*
- * x86Code: in Darling, IOKit is the iokitd daemon. It publishes its main port here
+ * x86Sim: in Darling, IOKit is the iokitd daemon. It publishes its main port here
  * so host_get_io_master() works (IOKit in iOS simulator processes relies on it; Darling's
  * own IOKit looks iokitd up by name). User tasks only hold the unprivileged host port.
  */

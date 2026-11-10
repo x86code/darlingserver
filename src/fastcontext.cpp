@@ -1,4 +1,4 @@
-// x86Code: getcontext()/setcontext() for darlingserver's microthreads without the signal mask.
+// x86Sim: getcontext()/setcontext() for darlingserver's microthreads without the signal mask.
 //
 // glibc's getcontext() and setcontext() each make an rt_sigprocmask syscall (to save and to restore the mask). Every
 // RPC switches microthread contexts about four times (Thread::doWork: getcontext of the thread top and of the new
@@ -41,7 +41,7 @@ __asm__(
 	"	movq %rcx, 160(%rdi)\n"
 	"	leaq 424(%rdi), %rcx\n"     // uc_mcontext.fpregs = &__fpregs_mem, as glibc does
 	"	movq %rcx, 224(%rdi)\n"
-	// x86Code (Speed 32): only the x87 control word. These switches happen at call boundaries, where the ABI leaves the
+	// x86Sim (Speed 32): only the x87 control word. These switches happen at call boundaries, where the ABI leaves the
 	// x87 stack empty and the status word holds nothing a callee relies on; fnstenv + fldenv (serializing, ~10% of
 	// darlingserver's own time per RPC) saved and reloaded the whole environment
 	"	fnstcw (%rcx)\n"

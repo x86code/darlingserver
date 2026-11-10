@@ -8,7 +8,7 @@
 struct dtape_semaphore {
 	dtape_task_t* owning_task;
 	semaphore_t xnu_semaphore;
-	// x86Code (willi/darlingserver#6): the creator's reference, plus one per dtape_semaphore_retain()
+	// x86Sim (willi/darlingserver#6): the creator's reference, plus one per dtape_semaphore_retain()
 	uint32_t references;
 };
 

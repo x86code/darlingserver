@@ -197,7 +197,7 @@ calls = [
 
 	('stop_after_exec', [], []),
 
-	# x86Code: the next exec completes a posix_spawn (fork + exec); it must not be reported as NOTE_EXEC
+	# x86Sim: the next exec completes a posix_spawn (fork + exec); it must not be reported as NOTE_EXEC
 	('spawn_exec', [], []),
 
 	('set_tracer', [
@@ -296,7 +296,7 @@ calls = [
 		('port_name', 'uint32_t'),
 	]),
 
-	# x86Code: fileports
+	# x86Sim: fileports
 	('fileport_makeport', [
 		('fd', '@fd'),
 	], [
@@ -434,18 +434,18 @@ calls = [
 		('ptype', 'uint32_t*', 'uint64_t'),
 	], [], XNU_TRAP_CALL | XNU_TRAP_NOSUFFIX_ARGS),
 
-	# x86Code: iokitd publishes its main port as the host IO master port
+	# x86Sim: iokitd publishes its main port as the host IO master port
 	('set_io_master_port', [
 		('name', 'uint32_t'),
 	], [], XNU_TRAP_CALL | XNU_TRAP_NOPREFIX | XNU_TRAP_NOSUFFIX),
 
-	# x86Code: posix_spawn special-port actions, applied like XNU's exec_handle_port_actions
+	# x86Sim: posix_spawn special-port actions, applied like XNU's exec_handle_port_actions
 	('spawn_set_special_port', [
 		('which', 'int32_t'),
 		('name', 'uint32_t'),
 	], [], XNU_TRAP_CALL | XNU_TRAP_NOPREFIX | XNU_TRAP_NOSUFFIX),
 
-	# x86Code: needed by libdispatch (task voucher) in iOS simulator processes
+	# x86Sim: needed by libdispatch (task voucher) in iOS simulator processes
 	('host_create_mach_voucher', [
 		('host', 'uint32_t'),
 		('recipes', 'void*', 'uint64_t'),
@@ -679,12 +679,12 @@ calls = [
 		('fd', '@fd'),
 	], UNMANAGED_CALL),
 
-	# x86Code: appended last so that the numbers of all other calls stay the same (mldr, the darling launcher
+	# x86Sim: appended last so that the numbers of all other calls stay the same (mldr, the darling launcher
 	# and other already-built clients keep working).
 	# The memfd behind a range of the caller's memory (made shared first if it isn't), for handing
 	# pages to a native Linux process without copying (spike3/metal: mtlvk imports MTLBuffer memory).
 	# `shared` is 0 when the fd only holds a snapshot (a file mapping, which is never replaced by a memfd).
-	('x86code_memfd_for_region', [
+	('x86sim_memfd_for_region', [
 		('address', 'uint64_t'),
 		('size', 'uint64_t'),
 	], [
@@ -1505,7 +1505,7 @@ for call in calls:
 	library_source.write("\t}\n\n")
 
 	library_source.write("retry_receive:\n")
-	# x86Code: a pushed unknown reply's recvmsg shrank msg_controllen; restore it before receiving again
+	# x86Sim: a pushed unknown reply's recvmsg shrank msg_controllen; restore it before receiving again
 	library_source.write("\treplymsg.msg_controllen = sizeof(controlbuf);\n")
 	library_source.write("\tlong_status = dserver_rpc_hooks_receive_message(server_socket, &replymsg);\n\n")
 
