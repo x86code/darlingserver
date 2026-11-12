@@ -884,7 +884,10 @@ kern_return_t mach_memory_entry_ownership(ipc_port_t entry_port, task_t owner, i
 	if (!x86sim_is_named_entry(entry_port)) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	if (ledger_tag != VM_LEDGER_TAG_NONE && (ledger_tag < 0 || ledger_tag > VM_LEDGER_TAG_MAX)) {
+	// x86Sim: -1 is VM_LEDGER_TAG_UNCHANGED (newer XNU; not in this tree's headers): keep the tag, change the owner.
+	// MetadataUtilities' owned allocations (Spotlight's PlistBytes, searchd) pass it; KERN_INVALID_ARGUMENT left
+	// searchd with "no indexers" and every CSSearchableIndex call failed.
+	if (ledger_tag != VM_LEDGER_TAG_NONE && ledger_tag != -1 && (ledger_tag < 0 || ledger_tag > VM_LEDGER_TAG_MAX)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 	return KERN_SUCCESS;
