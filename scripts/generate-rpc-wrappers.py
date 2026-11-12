@@ -523,6 +523,36 @@ calls = [
 	], [], XNU_TRAP_CALL | XNU_TRAP_NOPREFIX | ALLOW_INTERRUPTIONS),
 
 	#
+	# x86Sim: mach eventlink "traps" (XNU BSD syscalls 496-498: their 64-bit result, count and error, is written to
+	# `result` in the caller's memory). os_eventlink (AUAudioUnit's out-of-process render pipe, os_workgroup) needs them.
+	#
+
+	('mach_eventlink_signal', [
+		('eventlink_port', 'uint32_t'),
+		('signal_count', 'uint64_t'),
+		('result', 'uint64_t*', 'uint64_t'),
+	], [], XNU_TRAP_CALL | XNU_TRAP_NO_DTAPE_DEF),
+
+	('mach_eventlink_wait_until', [
+		('eventlink_port', 'uint32_t'),
+		('wait_count', 'uint64_t'),
+		('deadline', 'uint64_t'),
+		('clock_id', 'uint32_t'),
+		('option', 'uint32_t'),
+		('result', 'uint64_t*', 'uint64_t'),
+	], [], XNU_TRAP_CALL | XNU_TRAP_NO_DTAPE_DEF | ALLOW_INTERRUPTIONS),
+
+	('mach_eventlink_signal_wait_until', [
+		('eventlink_port', 'uint32_t'),
+		('wait_count', 'uint64_t'),
+		('signal_count', 'uint64_t'),
+		('deadline', 'uint64_t'),
+		('clock_id', 'uint32_t'),
+		('option', 'uint32_t'),
+		('result', 'uint64_t*', 'uint64_t'),
+	], [], XNU_TRAP_CALL | XNU_TRAP_NO_DTAPE_DEF | ALLOW_INTERRUPTIONS),
+
+	#
 	# mk_timer traps
 	#
 
