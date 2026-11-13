@@ -73,6 +73,9 @@ namespace DarlingServer {
 			uint64_t residentSize;
 			uint64_t pageSize;
 			uint64_t regionCount;
+			// x86Sim: CPU time the process has used (/proc/<pid>/stat utime / stime), microseconds
+			uint64_t userTimeUs;
+			uint64_t systemTimeUs;
 		};
 
 		struct MemoryRegionInfo {

@@ -289,6 +289,8 @@ struct DTapeHooks {
 		memory_info->resident_size = info.residentSize;
 		memory_info->page_size = info.pageSize;
 		memory_info->region_count = info.regionCount;
+		memory_info->user_time_us = info.userTimeUs;
+		memory_info->system_time_us = info.systemTimeUs;
 		return true;
 	};
 

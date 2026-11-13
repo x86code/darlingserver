@@ -34,6 +34,8 @@ typedef struct dtape_memory_info {
 	uint64_t resident_size;
 	uint64_t page_size;
 	uint64_t region_count;
+	uint64_t user_time_us;   // x86Sim: CPU time used (task_info basic / thread times)
+	uint64_t system_time_us;
 } dtape_memory_info_t;
 
 typedef enum dtape_memory_protection {

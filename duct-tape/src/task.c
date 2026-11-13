@@ -321,6 +321,24 @@ kern_return_t task_get_state(task_t  task, int flavor, thread_state_t state, mac
 	dtape_stub_unsafe();
 };
 
+// x86Sim: TASK_BASIC_INFO_64_2 (18) is defined by <mach/task_info.h> for arm only, and darlingserver is built for
+// x86_64: the flavor fell to the default case (KERN_INVALID_ARGUMENT), which RunningBoardServices' arm64
+// elapsedCPUTimeForFrontBoard asks for ("task_info failed with 0x4" in every app and shell). The arm64 layout (pack 4).
+#ifndef TASK_BASIC_INFO_64_2
+#define TASK_BASIC_INFO_64_2 18
+#pragma pack(push, 4)
+struct task_basic_info_64_2 {
+	integer_t suspend_count;
+	mach_vm_size_t virtual_size;
+	mach_vm_size_t resident_size;
+	time_value_t user_time;
+	time_value_t system_time;
+	policy_t policy;
+};
+#pragma pack(pop)
+#define TASK_BASIC_INFO_64_2_COUNT (sizeof(struct task_basic_info_64_2) / sizeof(natural_t))
+#endif
+
 kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_info_out, mach_msg_type_number_t* task_info_count) {
 	// x86Sim: as XNU's task_info: a port that names no task (a debugger asking for TASK_DYLD_INFO of a process that
 	// just died) is KERN_INVALID_ARGUMENT; this dereferenced NULL and took darlingserver (the whole container) down
@@ -345,9 +363,8 @@ kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_inf
 				return KERN_INVALID_ARGUMENT;
 			}
 
-			dtape_log_debug("%s: TODO: fetch utimeus and stimeus somehow", __FUNCTION__);
-			utimeus = 0;
-			stimeus = 0;
+			utimeus = mem_info.user_time_us;
+			stimeus = mem_info.system_time_us;
 
 			if (flavor == TASK_BASIC_INFO_32) {
 				struct task_basic_info_32* info = (void*)task_info_out;
@@ -432,9 +449,12 @@ kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_inf
 			}
 			*task_info_count = TASK_THREAD_TIMES_INFO_COUNT;
 
-			dtape_log_debug("%s: TODO: fetch utimeus and stimeus somehow", __FUNCTION__);
-			uint64_t utimeus = 0;
-			uint64_t stimeus = 0;
+			dtape_memory_info_t mem_info;
+			if (!dtape_hooks->task_get_memory_info(task->context, &mem_info)) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			uint64_t utimeus = mem_info.user_time_us;
+			uint64_t stimeus = mem_info.system_time_us;
 
 			info->user_time.seconds = utimeus / USEC_PER_SEC;
 			info->user_time.microseconds = utimeus % USEC_PER_SEC;

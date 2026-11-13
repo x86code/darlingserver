@@ -25,6 +25,7 @@
 #include <darlingserver/logging.hpp>
 
 #include <fstream>
+#include <sstream>
 #include <regex>
 #include <utility> // x86Sim
 #include <vector> // x86Sim
@@ -545,6 +546,29 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
 
 	// TODO
 	info.regionCount = 0;
+
+	// x86Sim: task_info's user / system time (RunningBoard's elapsedCPUTimeForFrontBoard, `ps`, Instruments) was
+	// always 0: /proc/<pid>/stat fields 14 and 15 (clock ticks), after the comm field's closing parenthesis
+	std::ifstream st("/proc/" + std::to_string(_pid) + "/stat");
+	std::string line;
+	if (std::getline(st, line)) {
+		auto rp = line.rfind(')');
+		if (rp != std::string::npos) {
+			std::istringstream fields(line.substr(rp + 2));
+			std::string f;
+			unsigned long long utime = 0, stime = 0;
+			// the fields after it start at field 3 (state); utime is field 14, stime 15
+			for (int i = 3; i <= 15 && (fields >> f); i++) {
+				if (i == 14) utime = std::stoull(f);
+				if (i == 15) stime = std::stoull(f);
+			}
+			long hz = sysconf(_SC_CLK_TCK);
+			if (hz > 0) {
+				info.userTimeUs = utime * 1000000ull / hz;
+				info.systemTimeUs = stime * 1000000ull / hz;
+			}
+		}
+	}
 
 	return info;
 };
